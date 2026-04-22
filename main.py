@@ -1,19 +1,17 @@
-# main.py
 import os
 import json
+import time
 import requests
 from datetime import datetime, timedelta, timezone
 
 import gspread
 from google.oauth2.service_account import Credentials
 
-# =========================
-# CONFIG
-# =========================
 SPREADSHEET_ID = "1KujvD6_Z6r0474URqHbjlWZthEW_XDqHa1IwtZ0PsqY"
 
 PRIVAT_SHEET = "Privat"
 MONO_SHEET = "Monobank"
+LOG_SHEET = "Logs"
 
 PB_ID = os.getenv("PB_ID")
 PB_TOKEN = os.getenv("PB_TOKEN")
@@ -24,33 +22,39 @@ MONO_IBAN = os.getenv("MONO_IBAN")
 
 GOOGLE_SERVICE_ACCOUNT = os.getenv("GOOGLE_SERVICE_ACCOUNT")
 
-KYIV_TZ = timezone(timedelta(hours=3))
+KYIV = timezone(timedelta(hours=3))
 
 
-# =========================
-# GOOGLE SHEETS
-# =========================
-def get_client():
-    creds_info = json.loads(GOOGLE_SERVICE_ACCOUNT)
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+# ---------------------------
+# GOOGLE
+# ---------------------------
+def client():
+    info = json.loads(GOOGLE_SERVICE_ACCOUNT)
+    creds = Credentials.from_service_account_info(
+        info,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
     return gspread.authorize(creds)
 
 
-def get_sheet(name):
-    gc = get_client()
+def worksheet(name):
+    gc = client()
     sh = gc.open_by_key(SPREADSHEET_ID)
-    return sh.worksheet(name)
+    try:
+        return sh.worksheet(name)
+    except:
+        ws = sh.add_worksheet(title=name, rows=1000, cols=20)
+        return ws
 
 
 def existing_ids(ws):
-    col = ws.col_values(1)
-    if not col:
+    vals = ws.col_values(1)
+    if len(vals) <= 1:
         return set()
-    return set(x.strip() for x in col[1:] if str(x).strip())
+    return set(str(x).strip() for x in vals[1:] if str(x).strip())
 
 
 def append_rows(ws, rows):
@@ -58,10 +62,40 @@ def append_rows(ws, rows):
         ws.append_rows(rows, value_input_option="USER_ENTERED")
 
 
-# =========================
-# PRIVATBANK
-# =========================
-def build_privat_id(tx):
+# ---------------------------
+# RETRY REQUEST
+# ---------------------------
+def api_get(url, headers=None, retries=5):
+    delay = 5
+
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, headers=headers, timeout=60)
+
+            if r.status_code == 429:
+                time.sleep(delay)
+                delay *= 2
+                continue
+
+            if r.status_code >= 500:
+                time.sleep(delay)
+                delay *= 2
+                continue
+
+            r.raise_for_status()
+            return r
+
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
+# ---------------------------
+# PRIVAT
+# ---------------------------
+def privat_id(tx):
     return "_".join([
         str(tx.get("REF", "")),
         str(tx.get("REFN", "")),
@@ -71,117 +105,95 @@ def build_privat_id(tx):
 
 
 def import_privat():
-    ws = get_sheet(PRIVAT_SHEET)
+    ws = worksheet(PRIVAT_SHEET)
     ids = existing_ids(ws)
 
-    today = datetime.now(KYIV_TZ)
+    today = datetime.now(KYIV)
     start = today - timedelta(days=29)
-
-    start_date = start.strftime("%d-%m-%Y")
-    end_date = today.strftime("%d-%m-%Y")
 
     url = (
         "https://acp.privatbank.ua/api/statements/transactions"
         f"?acc={PB_ACC}"
-        f"&startDate={start_date}"
-        f"&endDate={end_date}"
-        f"&limit=500"
+        f"&startDate={start.strftime('%d-%m-%Y')}"
+        f"&endDate={today.strftime('%d-%m-%Y')}"
+        "&limit=500"
     )
 
-    r = requests.get(
-        url,
-        headers={
-            "id": PB_ID,
-            "token": PB_TOKEN,
-            "User-Agent": "GitHubActions",
-        },
-        timeout=60,
-    )
-    r.raise_for_status()
+    r = api_get(url, headers={
+        "id": PB_ID,
+        "token": PB_TOKEN
+    })
 
     data = r.json()
-
-    if data.get("status") != "SUCCESS":
-        print("Privat API error")
-        return
-
     rows = []
 
-    for tx in data.get("transactions", []):
-        uid = build_privat_id(tx)
-        if not uid or uid in ids:
-            continue
+    if data.get("status") == "SUCCESS":
+        for tx in data.get("transactions", []):
+            uid = privat_id(tx)
+            if not uid or uid in ids:
+                continue
 
-        rows.append([
-            uid,
-            tx.get("DATE_TIME_DAT_OD_TIM_P", ""),
-            tx.get("TRANTYPE", ""),
-            float(tx.get("SUM", 0) or 0),
-            tx.get("CCY", ""),
-            tx.get("AUT_CNTR_NAM", ""),
-            tx.get("OSND", ""),
-            tx.get("AUT_CNTR_ACC", ""),
-        ])
-        ids.add(uid)
+            rows.append([
+                uid,
+                tx.get("DATE_TIME_DAT_OD_TIM_P", ""),
+                tx.get("TRANTYPE", ""),
+                float(tx.get("SUM", 0) or 0),
+                tx.get("CCY", ""),
+                tx.get("AUT_CNTR_NAM", ""),
+                tx.get("OSND", ""),
+                tx.get("AUT_CNTR_ACC", "")
+            ])
+            ids.add(uid)
 
     append_rows(ws, rows)
-    print(f"Privat added: {len(rows)}")
+    return len(rows)
 
 
-# =========================
-# MONOBANK
-# =========================
-def get_mono_account_id():
-    r = requests.get(
+# ---------------------------
+# MONO
+# ---------------------------
+def mono_account_id():
+    r = api_get(
         "https://api.monobank.ua/personal/client-info",
-        headers={"X-Token": MONO_TOKEN},
-        timeout=60,
+        headers={"X-Token": MONO_TOKEN}
     )
-    r.raise_for_status()
 
     data = r.json()
+
     for acc in data.get("accounts", []):
         if acc.get("iban") == MONO_IBAN:
-            return acc.get("id")
+            return acc["id"]
 
-    raise Exception("Monobank account not found")
+    raise Exception("Mono account not found")
 
 
-def build_mono_id(tx):
-    base = tx.get("id") or f'{tx.get("time")}_{tx.get("amount")}_{tx.get("description","")}'
+def mono_id(tx):
+    base = tx.get("id") or f'{tx["time"]}_{tx["amount"]}'
     return f"{MONO_IBAN}_{base}"
 
 
 def import_mono():
-    ws = get_sheet(MONO_SHEET)
+    ws = worksheet(MONO_SHEET)
     ids = existing_ids(ws)
 
-    account_id = get_mono_account_id()
+    acc_id = mono_account_id()
 
     now = datetime.now(timezone.utc)
-    from_dt = now - timedelta(days=30)
+    start = now - timedelta(days=30)
 
-    from_ts = int(from_dt.timestamp())
-    to_ts = int(now.timestamp())
+    url = f"https://api.monobank.ua/personal/statement/{acc_id}/{int(start.timestamp())}/{int(now.timestamp())}"
 
-    url = f"https://api.monobank.ua/personal/statement/{account_id}/{from_ts}/{to_ts}"
-
-    r = requests.get(
-        url,
-        headers={"X-Token": MONO_TOKEN},
-        timeout=60,
-    )
-    r.raise_for_status()
-
+    r = api_get(url, headers={"X-Token": MONO_TOKEN})
     data = r.json()
+
     rows = []
 
     for tx in data:
-        uid = build_mono_id(tx)
+        uid = mono_id(tx)
         if uid in ids:
             continue
 
-        dt = datetime.fromtimestamp(tx["time"], tz=timezone.utc).astimezone(KYIV_TZ)
+        dt = datetime.fromtimestamp(tx["time"], timezone.utc).astimezone(KYIV)
 
         amount = tx.get("amount", 0) / 100
         balance = tx.get("balance", 0) / 100
@@ -198,22 +210,48 @@ def import_mono():
             tx.get("mcc", ""),
             tx.get("comment", ""),
             tx.get("counterEdrpou", ""),
-            tx.get("counterIban", ""),
+            tx.get("counterIban", "")
         ])
 
         ids.add(uid)
 
     rows.sort(key=lambda x: x[2])
     append_rows(ws, rows)
-    print(f"Monobank added: {len(rows)}")
+    return len(rows)
 
 
-# =========================
+# ---------------------------
+# LOGS
+# ---------------------------
+def write_log(privat_count, mono_count, status="OK"):
+    ws = worksheet(LOG_SHEET)
+
+    if ws.row_count == 1000 and ws.get_all_values() == []:
+        ws.append_row(["Date", "Privat Added", "Monobank Added", "Status"])
+
+    ws.append_row([
+        datetime.now(KYIV).strftime("%Y-%m-%d %H:%M:%S"),
+        privat_count,
+        mono_count,
+        status
+    ])
+
+
+# ---------------------------
 # MAIN
-# =========================
+# ---------------------------
 def main():
-    import_privat()
-    import_mono()
+    privat_added = 0
+    mono_added = 0
+
+    try:
+        privat_added = import_privat()
+        mono_added = import_mono()
+        write_log(privat_added, mono_added, "OK")
+
+    except Exception as e:
+        write_log(privat_added, mono_added, str(e))
+        raise
 
 
 if __name__ == "__main__":
