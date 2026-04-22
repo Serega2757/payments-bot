@@ -1,0 +1,4 @@
+# requirements.txt
+gspread
+google-auth
+requests
