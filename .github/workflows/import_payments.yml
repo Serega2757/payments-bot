@@ -1,0 +1,37 @@
+name: Import Payments
+
+on:
+  schedule:
+    # головний запуск щодня о 06:00 UTC (09:00 Київ)
+    - cron: '0 6 * * *'
+
+    # повторні спроби щогодини
+    - cron: '0 * * * *'
+
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install packages
+        run: pip install -r requirements.txt
+
+      - name: Run importer
+        env:
+          GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+          PB_ID: ${{ secrets.PB_ID }}
+          PB_TOKEN: ${{ secrets.PB_TOKEN }}
+          PB_ACC: ${{ secrets.PB_ACC }}
+          MONO_TOKEN: ${{ secrets.MONO_TOKEN }}
+          MONO_IBAN: ${{ secrets.MONO_IBAN }}
+        run: python main.py
