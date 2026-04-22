@@ -128,7 +128,26 @@ def write_log(privat_count, mono_count, status):
         mono_count,
         status
     ])
+def format_privat_date(value):
+    if not value:
+        return ""
 
+    patterns = [
+        "%d-%m-%Y",
+        "%d.%m.%Y",
+        "%Y-%m-%d",
+        "%d-%m-%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M:%S",
+    ]
+
+    for fmt in patterns:
+        try:
+            dt = datetime.strptime(str(value), fmt)
+            return dt.strftime("%d.%m.%Y")
+        except:
+            pass
+
+    return str(value)
 
 # =========================
 # PRIVAT
@@ -173,7 +192,7 @@ def import_privat():
 
             rows.append([
                 uid,
-                tx.get("DATE_TIME_DAT_OD_TIM_P", ""),
+                format_privat_date(tx.get("DATE_TIME_DAT_OD_TIM_P", "")),
                 tx.get("TRANTYPE", ""),
                 float(tx.get("SUM", 0) or 0),
                 tx.get("CCY", ""),
@@ -242,7 +261,7 @@ def import_mono():
         rows.append([
             uid,
             MONO_IBAN,
-            dt.strftime("%Y-%m-%d %H:%M:%S"),
+            dt.strftime("%d.%m.%Y"),
             tx.get("description", ""),
             amount,
             "IN" if amount >= 0 else "OUT",
