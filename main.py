@@ -593,12 +593,20 @@ def import_novapay():
         amount = doc.attrib.get("Amount", "")
         payment_type = child_text(doc, "PaymentType").strip()
         purpose = child_text(doc, "Purpose").strip()
-
-        date_value = (
-            child_text(doc, "DayDate")
-            or child_text(doc, "OrgDate")
-            or child_text(doc, "PayDate")
-        )
+        
+        if payment_type == "Debit":
+            account_name = child_text(doc, "CreditName").strip()
+        else:
+            account_name = child_text(doc, "DebitName").strip()
+        
+        rows.append([
+            normalize_date(date_value),   # A
+            code,                         # B
+            float(amount or 0),           # C
+            payment_type,                 # D
+            purpose,                      # E
+            account_name                  # F
+        ])
 
         rows.append([
             normalize_date(date_value),
