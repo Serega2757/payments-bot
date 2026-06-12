@@ -103,25 +103,44 @@ def api_get(url, headers=None, retries=5):
 
 def api_post(url, data, headers=None, retries=5):
     delay = 5
+    last_status = None
+    last_text = ""
 
     for attempt in range(retries):
         try:
-            r = requests.post(url, data=data.encode("utf-8"), headers=headers, timeout=90)
+            r = requests.post(
+                url,
+                data=data.encode("utf-8"),
+                headers=headers,
+                timeout=90
+            )
 
-            if r.status_code in (429, 500, 502, 503, 504):
+            last_status = r.status_code
+            last_text = r.text or ""
+
+            # SOAP часто повертає 500 разом із XML Fault.
+            # Тому не можна просто мовчки continue без збереження тіла відповіді.
+            if r.status_code in (429, 502, 503, 504):
                 print(f"Retry POST {attempt + 1}: HTTP {r.status_code}")
                 time.sleep(delay)
                 delay *= 2
                 continue
 
-            r.raise_for_status()
-            return r.text
+            if r.status_code >= 400:
+                raise Exception(
+                    f"NovaPay HTTP {r.status_code}: {last_text[:3000]}"
+                )
+
+            return last_text
 
         except Exception as e:
             if attempt == retries - 1:
                 raise e
+            print(f"Retry POST {attempt + 1}: {e}")
             time.sleep(delay)
             delay *= 2
+
+    raise Exception(f"NovaPay POST failed. Last HTTP {last_status}: {last_text[:3000]}")
 
 
 def normalize_date(value):
@@ -380,18 +399,20 @@ def soap_envelope(method_name, body_xml):
 </soapenv:Envelope>"""
 
 
-def novapay_call(method_name, body_xml, soap_action=None):
+def novapay_call(method_name, body_xml):
     xml = soap_envelope(method_name, body_xml)
 
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": f'"http://tempuri.org/IClientAPIService/{method_name}"',
         "User-Agent": "GitHubActions",
     }
 
-    if soap_action:
-        headers["SOAPAction"] = soap_action
-
     text = api_post(NOVAPAY_ENDPOINT, xml, headers=headers)
+
+    if not text:
+        raise Exception(f"NovaPay empty response for {method_name}")
+
     return ET.fromstring(text)
 
 
