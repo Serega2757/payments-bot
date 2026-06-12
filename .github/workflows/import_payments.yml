@@ -34,4 +34,8 @@ jobs:
           PB_ACC: ${{ secrets.PB_ACC }}
           MONO_TOKEN: ${{ secrets.MONO_TOKEN }}
           MONO_IBAN: ${{ secrets.MONO_IBAN }}
+          NOVAPAY_LOGIN: ${{ secrets.NOVAPAY_LOGIN }}
+          NOVAPAY_REFRESH_TOKEN: ${{ secrets.NOVAPAY_REFRESH_TOKEN }}
+          NOVAPAY_PUBLIC_CERTIFICATE: ${{ secrets.NOVAPAY_PUBLIC_CERTIFICATE }}
+          NOVAPAY_ACCOUNT_ID: ${{ secrets.NOVAPAY_ACCOUNT_ID }}
         run: python main.py
