@@ -34,10 +34,6 @@ KYIV = timezone(timedelta(hours=3))
 NOVAPAY_ENDPOINT = "https://business.novapay.ua/Services/ClientAPIService.svc"
 
 
-# =========================
-# GOOGLE SHEETS
-# =========================
-
 def gs_client():
     info = json.loads(GOOGLE_SERVICE_ACCOUNT)
     creds = Credentials.from_service_account_info(
@@ -74,12 +70,9 @@ def append_rows(ws, rows):
         ws.append_rows(rows, value_input_option="USER_ENTERED")
 
 
-# =========================
-# COMMON
-# =========================
-
 def api_get(url, headers=None, retries=5):
     delay = 5
+    last_error = None
 
     for attempt in range(retries):
         try:
@@ -95,10 +88,13 @@ def api_get(url, headers=None, retries=5):
             return r
 
         except Exception as e:
+            last_error = e
             if attempt == retries - 1:
-                raise e
+                raise
             time.sleep(delay)
             delay *= 2
+
+    raise last_error
 
 
 def api_post(url, data, headers=None, retries=5):
@@ -112,14 +108,12 @@ def api_post(url, data, headers=None, retries=5):
                 url,
                 data=data.encode("utf-8"),
                 headers=headers,
-                timeout=90
+                timeout=90,
             )
 
             last_status = r.status_code
             last_text = r.text or ""
 
-            # SOAP часто повертає 500 разом із XML Fault.
-            # Тому не можна просто мовчки continue без збереження тіла відповіді.
             if r.status_code in (429, 502, 503, 504):
                 print(f"Retry POST {attempt + 1}: HTTP {r.status_code}")
                 time.sleep(delay)
@@ -127,15 +121,13 @@ def api_post(url, data, headers=None, retries=5):
                 continue
 
             if r.status_code >= 400:
-                raise Exception(
-                    f"NovaPay HTTP {r.status_code}: {last_text[:3000]}"
-                )
+                raise Exception(f"NovaPay HTTP {r.status_code}: {last_text[:3000]}")
 
             return last_text
 
         except Exception as e:
             if attempt == retries - 1:
-                raise e
+                raise
             print(f"Retry POST {attempt + 1}: {e}")
             time.sleep(delay)
             delay *= 2
@@ -158,13 +150,18 @@ def normalize_date(value):
         "%Y-%m-%d %H:%M:%S",
     ]
 
-    for p in patterns:
+    for pattern in patterns:
         try:
-            return datetime.strptime(value, p).strftime("%d.%m.%Y")
+            return datetime.strptime(value, pattern).strftime("%d.%m.%Y")
         except ValueError:
             pass
 
     return value[:10].replace("-", ".")
+
+
+def ensure_log_header(ws):
+    if not ws.get_all_values():
+        ws.append_row(["Date", "Privat Added", "Monobank Added", "NovaPay Added", "Status"])
 
 
 def already_success_today():
@@ -181,11 +178,6 @@ def already_success_today():
     return False
 
 
-def ensure_log_header(ws):
-    if not ws.get_all_values():
-        ws.append_row(["Date", "Privat Added", "Monobank Added", "NovaPay Added", "Status"])
-
-
 def write_log(privat_count, mono_count, novapay_count, status):
     ws = worksheet(LOG_SHEET)
     ensure_log_header(ws)
@@ -198,10 +190,6 @@ def write_log(privat_count, mono_count, novapay_count, status):
         status,
     ])
 
-
-# =========================
-# PRIVATBANK
-# =========================
 
 def privat_uid(tx):
     return "_".join([
@@ -234,10 +222,11 @@ def import_privat():
     })
 
     data = r.json()
-    rows = []
 
     if data.get("status") != "SUCCESS":
         raise Exception(f"Privat API error: {data}")
+
+    rows = []
 
     for tx in data.get("transactions", []):
         uid = privat_uid(tx)
@@ -260,10 +249,6 @@ def import_privat():
     append_rows(ws, rows)
     return len(rows)
 
-
-# =========================
-# MONOBANK
-# =========================
 
 def mono_account_id():
     r = api_get(
@@ -298,7 +283,10 @@ def import_mono():
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=30)
 
-    url = f"https://api.monobank.ua/personal/statement/{account_id}/{int(start.timestamp())}/{int(now.timestamp())}"
+    url = (
+        f"https://api.monobank.ua/personal/statement/"
+        f"{account_id}/{int(start.timestamp())}/{int(now.timestamp())}"
+    )
 
     r = api_get(
         url,
@@ -343,10 +331,6 @@ def import_mono():
     return len(rows)
 
 
-# =========================
-# NOVAPAY
-# =========================
-
 def xml_text(root, tag_name):
     for el in root.iter():
         if el.tag.split("}")[-1] == tag_name:
@@ -356,6 +340,13 @@ def xml_text(root, tag_name):
 
 def xml_elements(root, tag_name):
     return [el for el in root.iter() if el.tag.split("}")[-1] == tag_name]
+
+
+def child_text(parent, tag_name):
+    for child in list(parent):
+        if child.tag.split("}")[-1] == tag_name:
+            return child.text or ""
+    return ""
 
 
 def novapay_config_read():
@@ -372,8 +363,8 @@ def novapay_config_read():
 
     if not refresh_token or not public_certificate:
         raise Exception(
-            "NovaPay_Config не заповнений. Потрібно A1=refresh_token, B1=токен; "
-            "A2=public_certificate, B2=сертифікат PEM"
+            "NovaPay_Config не заповнений. Потрібно: "
+            "A1=refresh_token, B1=токен; A2=public_certificate, B2=сертифікат PEM"
         )
 
     return refresh_token, public_certificate
@@ -381,10 +372,13 @@ def novapay_config_read():
 
 def novapay_config_write(refresh_token, public_certificate):
     ws = worksheet(NOVAPAY_CONFIG_SHEET, rows=20, cols=2)
-    ws.update("A1:B2", [
-        ["refresh_token", refresh_token],
-        ["public_certificate", public_certificate],
-    ])
+    ws.update(
+        values=[
+            ["refresh_token", refresh_token],
+            ["public_certificate", public_certificate],
+        ],
+        range_name="A1:B2",
+    )
 
 
 def soap_envelope(method_name, body_xml):
@@ -419,11 +413,9 @@ def novapay_call(method_name, body_xml):
 def novapay_auth_jwt():
     refresh_token, public_certificate = novapay_config_read()
 
-    request_ref = str(uuid.uuid4())
-
     body = f"""
 <tem:request>
-  <tem:request_ref>{html.escape(request_ref)}</tem:request_ref>
+  <tem:request_ref>{html.escape(str(uuid.uuid4()))}</tem:request_ref>
   <tem:refresh_token>{html.escape(refresh_token)}</tem:refresh_token>
   <tem:login>{html.escape(NOVAPAY_LOGIN)}</tem:login>
   <tem:public_certificate>{html.escape(public_certificate)}</tem:public_certificate>
@@ -462,19 +454,13 @@ def novapay_get_clients(jwt):
     if result and result.lower() != "ok":
         raise Exception(f"NovaPay GetClientsList error: {ET.tostring(root, encoding='unicode')}")
 
-    clients = xml_elements(root, "Clients")
-    if not clients:
-        clients = xml_elements(root, "Client")
+    clients = xml_elements(root, "Clients") or xml_elements(root, "Client")
 
     ids = []
     for client in clients:
-        cid = ""
-        for child in list(client):
-            if child.tag.split("}")[-1].lower() == "id":
-                cid = child.text or ""
-                break
-        if cid:
-            ids.append(cid)
+        cid = child_text(client, "id")
+        if cid and cid.strip().isdigit():
+            ids.append(cid.strip())
 
     if not ids:
         for el in xml_elements(root, "id"):
@@ -502,28 +488,20 @@ def novapay_get_single_account(jwt, client_id):
     if result and result.lower() != "ok":
         raise Exception(f"NovaPay GetAccountsList error: {ET.tostring(root, encoding='unicode')}")
 
-    accounts = xml_elements(root, "Accounts")
-    if not accounts:
-        accounts = xml_elements(root, "Account")
+    accounts = xml_elements(root, "Accounts") or xml_elements(root, "Account")
 
     account_ids = []
     for acc in accounts:
-        status = ""
-        acc_id = ""
-
-        for child in list(acc):
-            name = child.tag.split("}")[-1].lower()
-            if name == "id":
-                acc_id = child.text or ""
-            elif name == "statuscode":
-                status = child.text or ""
+        acc_id = child_text(acc, "id")
+        status = child_text(acc, "statuscode")
 
         if acc_id and (not status or status.lower() == "active"):
-            account_ids.append(acc_id)
+            account_ids.append(acc_id.strip())
 
     if not account_ids:
-        ids = [el.text.strip() for el in xml_elements(root, "id") if el.text and el.text.strip().isdigit()]
-        account_ids = ids
+        for el in xml_elements(root, "id"):
+            if el.text and el.text.strip().isdigit():
+                account_ids.append(el.text.strip())
 
     if not account_ids:
         raise Exception(f"NovaPay account not found: {ET.tostring(root, encoding='unicode')}")
@@ -535,16 +513,13 @@ def novapay_get_payments(jwt, account_id):
     today = datetime.now(KYIV)
     start = today - timedelta(days=29)
 
-    date_from = start.strftime("%d.%m.%Y")
-    date_to = today.strftime("%d.%m.%Y")
-
     body = f"""
 <tem:request>
   <tem:request_ref>{html.escape(str(uuid.uuid4()))}</tem:request_ref>
   <tem:jwt>{html.escape(jwt)}</tem:jwt>
   <tem:account_id>{html.escape(str(account_id))}</tem:account_id>
-  <tem:date_from>{date_from}</tem:date_from>
-  <tem:date_to>{date_to}</tem:date_to>
+  <tem:date_from>{start.strftime("%d.%m.%Y")}</tem:date_from>
+  <tem:date_to>{today.strftime("%d.%m.%Y")}</tem:date_to>
   <tem:date_type>0</tem:date_type>
 </tem:request>
 """
@@ -566,16 +541,8 @@ def novapay_get_payments(jwt, account_id):
     return xml_elements(payments_root, "Docs")
 
 
-def child_text(parent, tag_name):
-    for child in list(parent):
-        if child.tag.split("}")[-1] == tag_name:
-            return child.text or ""
-    return ""
-
-
 def import_novapay():
     ws = worksheet(NOVAPAY_SHEET, rows=1000, cols=10)
-
     existing_codes = existing_ids(ws, column=2)
 
     jwt = novapay_auth_jwt()
@@ -591,22 +558,22 @@ def import_novapay():
             continue
 
         amount = doc.attrib.get("Amount", "")
+        if not amount:
+            amount = child_text(doc, "Amount")
+
         payment_type = child_text(doc, "PaymentType").strip()
         purpose = child_text(doc, "Purpose").strip()
-        
+
+        date_value = (
+            child_text(doc, "DayDate")
+            or child_text(doc, "OrgDate")
+            or child_text(doc, "PayDate")
+        )
+
         if payment_type == "Debit":
             account_name = child_text(doc, "CreditName").strip()
         else:
             account_name = child_text(doc, "DebitName").strip()
-        
-        rows.append([
-            normalize_date(date_value),   # A
-            code,                         # B
-            float(amount or 0),           # C
-            payment_type,                 # D
-            purpose,                      # E
-            account_name                  # F
-        ])
 
         rows.append([
             normalize_date(date_value),
@@ -614,6 +581,7 @@ def import_novapay():
             float(amount or 0),
             payment_type,
             purpose,
+            account_name,
         ])
 
         existing_codes.add(code)
@@ -623,10 +591,6 @@ def import_novapay():
 
     return len(rows)
 
-
-# =========================
-# MAIN
-# =========================
 
 def main():
     if already_success_today():
