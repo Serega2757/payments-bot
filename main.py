@@ -14,18 +14,30 @@ from google.oauth2.service_account import Credentials
 SPREADSHEET_ID = "1KujvD6_Z6r0474URqHbjlWZthEW_XDqHa1IwtZ0PsqY"
 
 PRIVAT_SHEET = "Privat"
-MONO_SHEET = "Monobank"
 NOVAPAY_SHEET = "NovaPay Анастасія"
 NOVAPAY_CONFIG_SHEET = "NovaPay_Config"
 LOG_SHEET = "Logs"
 
+# Monobank рахунки
+MONO_ACCOUNTS = [
+    {
+        "token": os.getenv("MONO_TOKEN_1"),
+        "iban": os.getenv("MONO_IBAN_1"),
+        "sheet": "МОНО Анастасія"
+    },
+    {
+        "token": os.getenv("MONO_TOKEN_2"),
+        "iban": os.getenv("MONO_IBAN_2"),
+        "sheet": "МОНО Сергій"
+    }
+]
+
+# PrivatBank
 PB_ID = os.getenv("PB_ID")
 PB_TOKEN = os.getenv("PB_TOKEN")
 PB_ACC = os.getenv("PB_ACC")
 
-MONO_TOKEN = os.getenv("MONO_TOKEN")
-MONO_IBAN = os.getenv("MONO_IBAN")
-
+# NovaPay
 NOVAPAY_LOGIN = os.getenv("NOVAPAY_LOGIN")
 
 GOOGLE_SERVICE_ACCOUNT = os.getenv("GOOGLE_SERVICE_ACCOUNT")
@@ -250,35 +262,31 @@ def import_privat():
     return len(rows)
 
 
-def mono_account_id():
+def import_mono_account(account):
+    """Импорт одного рахунку Monobank"""
+    ws = worksheet(account["sheet"])
+    ids = existing_ids(ws, column=1)
+
+    # Получаем ID рахунку по IBAN
     r = api_get(
         "https://api.monobank.ua/personal/client-info",
         headers={
-            "X-Token": MONO_TOKEN,
+            "X-Token": account["token"],
             "Accept": "application/json",
             "User-Agent": "GitHubActions",
         },
     )
 
     data = r.json()
+    account_id = None
 
     for acc in data.get("accounts", []):
-        if acc.get("iban") == MONO_IBAN:
-            return acc["id"]
+        if acc.get("iban") == account["iban"]:
+            account_id = acc["id"]
+            break
 
-    raise Exception("Monobank account not found")
-
-
-def mono_uid(tx):
-    base = tx.get("id") or f'{tx.get("time")}_{tx.get("amount")}_{tx.get("description", "")}'
-    return f"{MONO_IBAN}_{base}"
-
-
-def import_mono():
-    ws = worksheet(MONO_SHEET)
-    ids = existing_ids(ws, column=1)
-
-    account_id = mono_account_id()
+    if not account_id:
+        raise Exception(f"Monobank account {account['iban']} not found")
 
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=30)
@@ -291,7 +299,7 @@ def import_mono():
     r = api_get(
         url,
         headers={
-            "X-Token": MONO_TOKEN,
+            "X-Token": account["token"],
             "Accept": "application/json",
             "User-Agent": "GitHubActions",
         },
@@ -301,7 +309,9 @@ def import_mono():
     rows = []
 
     for tx in data:
-        uid = mono_uid(tx)
+        base = tx.get("id") or f'{tx.get("time")}_{tx.get("amount")}_{tx.get("description", "")}'
+        uid = f"{account['iban']}_{base}"
+
         if uid in ids:
             continue
 
@@ -311,7 +321,7 @@ def import_mono():
 
         rows.append([
             uid,
-            MONO_IBAN,
+            account["iban"],
             dt.strftime("%d.%m.%Y"),
             tx.get("description", ""),
             amount,
@@ -329,6 +339,25 @@ def import_mono():
     rows.sort(key=lambda x: x[2])
     append_rows(ws, rows)
     return len(rows)
+
+
+def import_mono():
+    """Импорт всех рахунків Monobank"""
+    total = 0
+    for account in MONO_ACCOUNTS:
+        if not account["token"] or not account["iban"]:
+            print(f"  Skipping {account['sheet']}: missing token or IBAN")
+            continue
+
+        try:
+            added = import_mono_account(account)
+            print(f"  {account['sheet']}: {added} rows added")
+            total += added
+        except Exception as e:
+            print(f"  Error {account['sheet']}: {e}")
+            raise
+
+    return total
 
 
 def xml_text(root, tag_name):
@@ -603,18 +632,21 @@ def main():
 
     try:
         privat_added = import_privat()
+        print(f"Privat added: {privat_added}")
+
+        print("Monobank:")
         mono_added = import_mono()
+
         novapay_added = import_novapay()
+        print(f"NovaPay added: {novapay_added}")
 
         write_log(privat_added, mono_added, novapay_added, "OK")
 
-        print(f"Privat added: {privat_added}")
-        print(f"Monobank added: {mono_added}")
-        print(f"NovaPay added: {novapay_added}")
-        print("Success")
+        print("\n✓ Success")
 
     except Exception as e:
         write_log(privat_added, mono_added, novapay_added, str(e))
+        print(f"✗ Error: {e}")
         raise
 
 
