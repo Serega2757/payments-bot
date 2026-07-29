@@ -82,17 +82,6 @@ def worksheet(sheet_name):
     except:
         return get_gsheet().add_worksheet(title=sheet_name, rows=1000, cols=20)
 
-def row_exists(ws, row_id):
-    """Перевірити, чи рядок вже існує"""
-    try:
-        records = ws.get_all_values()
-        for row in records:
-            if row and row[0] == row_id:
-                return True
-        return False
-    except:
-        return False
-
 def write_to_sheet(ws, row_data):
     """Записати рядок в таблицю"""
     try:
@@ -165,7 +154,13 @@ def import_mono_single(account):
         for s in statements:
             row_id = f"mono_{account_id}_{s.get('id')}"
             
-            if not row_exists(ws, row_id):
+            # Проверить только один раз - есть ли этот платеж
+            try:
+                ws.find(row_id)
+                # Если нашли - значит этот и все последующие уже записаны
+                break
+            except:
+                # Не нашли - записываем и продолжаем
                 row_data = [
                     row_id,
                     datetime.fromtimestamp(s.get('time')).strftime("%Y-%m-%d %H:%M:%S"),
@@ -270,7 +265,13 @@ def import_novapay_single(account):
         for s in statements:
             row_id = f"nova_{login}_{s.get('id')}"
             
-            if not row_exists(ws, row_id):
+            # Проверить только один раз - есть ли этот платеж
+            try:
+                ws.find(row_id)
+                # Если нашли - значит этот и все последующие уже записаны
+                break
+            except:
+                # Не нашли - записываем и продолжаем
                 row_data = [
                     row_id,
                     s.get('date', ''),
