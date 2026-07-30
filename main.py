@@ -115,7 +115,7 @@ def get_monobank_statements(token, account_id):
     """Отримати виписку з Monobank"""
     try:
         headers = {"X-Token": token}
-        from_time = int((datetime.now() - timedelta(days=30)).timestamp())
+        from_time = int((datetime.now() - timedelta(days=60)).timestamp())
         
         resp = requests.get(
             f"https://api.monobank.ua/personal/statement/{account_id}/{from_time}",
@@ -221,7 +221,7 @@ def get_novapay_statements(jwt_token):
             "Content-Type": "application/json"
         }
         
-        from_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        from_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
         payload = {
             "from": from_date,
             "to": datetime.now().strftime("%Y-%m-%d")
