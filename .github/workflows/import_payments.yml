@@ -2,15 +2,13 @@ name: Import Payments
 
 on:
   schedule:
-    - cron: '0 6 * * *'
-    - cron: '0 * * * *'
-
+    - cron: '0 6 * * *'  # Runs at 06:AM
+    - cron: '0 * * * *'  # Runs every hour
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,7 +27,14 @@ jobs:
           PB_ID: ${{ secrets.PB_ID }}
           PB_TOKEN: ${{ secrets.PB_TOKEN }}
           PB_ACC: ${{ secrets.PB_ACC }}
-          MONO_TOKEN: ${{ secrets.MONO_TOKEN }}
-          MONO_IBAN: ${{ secrets.MONO_IBAN }}
+          MONO_TOKEN_1: ${{ secrets.MONO_TOKEN_1 }}
+          MONO_IBAN_1: ${{ secrets.MONO_IBAN_1 }}
+          MONO_TOKEN_2: ${{ secrets.MONO_TOKEN_2 }}
+          MONO_IBAN_2: ${{ secrets.MONO_IBAN_2 }}
           NOVAPAY_LOGIN: ${{ secrets.NOVAPAY_LOGIN }}
+          NOVAPAY_PUBLIC_CERTIFICATE: ${{ secrets.NOVAPAY_PUBLIC_CERTIFICATE }}
+          NOVAPAY_REFRESH_TOKEN: ${{ secrets.NOVAPAY_REFRESH_TOKEN }}
+          NOVAPAY_LOGIN_2: ${{ secrets.NOVAPAY_LOGIN_2 }}
+          NOVAPAY_PUBLIC_CERTIFICATE_2: ${{ secrets.NOVAPAY_PUBLIC_CERTIFICATE_2 }}
+          NOVAPAY_REFRESH_TOKEN_2: ${{ secrets.NOVAPAY_REFRESH_TOKEN_2 }}
         run: python main.py
