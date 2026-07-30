@@ -55,6 +55,44 @@ NOVAPAY_ACCOUNTS = [
 ]
 
 # ============================================================================
+# ЛОГИРОВАНИЕ ИНИЦИАЛИЗАЦИИ
+# ============================================================================
+
+def log_initialization():
+    """Логирование переменных окружения для отладки"""
+    logger.info("📋 ENVIRONMENT VARIABLES CHECK:")
+    logger.info(f"  MONO_TOKEN_1:              {'✓ SET' if MONO_TOKEN_1 else '✗ NOT SET'}")
+    logger.info(f"  MONO_IBAN_1:               {'✓ SET' if MONO_IBAN_1 else '✗ NOT SET'}")
+    logger.info(f"  MONO_TOKEN_2:              {'✓ SET' if MONO_TOKEN_2 else '✗ NOT SET'}")
+    logger.info(f"  MONO_IBAN_2:               {'✓ SET' if MONO_IBAN_2 else '✗ NOT SET'}")
+    logger.info(f"  NOVAPAY_LOGIN:             {'✓ SET' if NOVAPAY_LOGIN else '✗ NOT SET'}")
+    logger.info(f"  NOVAPAY_PUBLIC_CERT:       {'✓ SET' if NOVAPAY_PUBLIC_CERTIFICATE else '✗ NOT SET'}")
+    logger.info(f"  NOVAPAY_REFRESH_TOKEN:     {'✓ SET' if NOVAPAY_REFRESH_TOKEN else '✗ NOT SET'}")
+    logger.info(f"  NOVAPAY_LOGIN_2:           {'✓ SET' if NOVAPAY_LOGIN_2 else '✗ NOT SET'}")
+    logger.info(f"  NOVAPAY_PUBLIC_CERT_2:     {'✓ SET' if NOVAPAY_PUBLIC_CERTIFICATE_2 else '✗ NOT SET'}")
+    logger.info(f"  NOVAPAY_REFRESH_TOKEN_2:   {'✓ SET' if NOVAPAY_REFRESH_TOKEN_2 else '✗ NOT SET'}")
+    logger.info(f"  PB_ID:                     {'✓ SET' if PB_ID else '✗ NOT SET'}")
+    logger.info(f"  PB_TOKEN:                  {'✓ SET' if PB_TOKEN else '✗ NOT SET'}")
+    logger.info(f"  PB_ACC:                    {'✓ SET' if PB_ACC else '✗ NOT SET'}")
+    logger.info(f"  GOOGLE_SERVICE_ACCOUNT:    {'✓ SET' if GOOGLE_SERVICE_ACCOUNT else '✗ NOT SET'}")
+    
+    logger.info("\n📦 ACCOUNTS CONFIGURATION:")
+    logger.info(f"  Monobank accounts configured: {len([a for a in MONO_ACCOUNTS if a.get('token') and a.get('iban')])}/{len(MONO_ACCOUNTS)}")
+    for i, acc in enumerate(MONO_ACCOUNTS):
+        has_token = bool(acc.get('token'))
+        has_iban = bool(acc.get('iban'))
+        logger.info(f"    Account {i+1} ({acc.get('sheet')}): token={has_token}, iban={has_iban}")
+    
+    logger.info(f"  NovaPay accounts configured: {len([a for a in NOVAPAY_ACCOUNTS if a.get('login') and a.get('certificate') and a.get('refresh_token')])}/{len(NOVAPAY_ACCOUNTS)}")
+    for i, acc in enumerate(NOVAPAY_ACCOUNTS):
+        has_login = bool(acc.get('login'))
+        has_cert = bool(acc.get('certificate'))
+        has_token = bool(acc.get('refresh_token'))
+        logger.info(f"    Account {i+1} ({acc.get('sheet')}): login={has_login}, cert={has_cert}, token={has_token}")
+    
+    logger.info(f"  PrivatBank configured: {'✓ YES' if all([PB_ID, PB_TOKEN, PB_ACC]) else '✗ NO'}")
+
+# ============================================================================
 # GOOGLE SHEETS
 # ============================================================================
 
@@ -179,11 +217,10 @@ def import_mono_single(account):
             
             try:
                 ws.find(row_id)
-                logger.info(f"  ✓ Found existing payment at position {i}, stopping search (all prior payments exist)")
+                logger.info(f"  ✓ Found existing payment at position {i}, stopping search")
                 found_existing = True
                 break
             except:
-                # Не нашли - записываем и продолжаем
                 row_data = [
                     row_id,
                     datetime.fromtimestamp(s.get('time')).strftime("%Y-%m-%d %H:%M:%S"),
@@ -195,12 +232,9 @@ def import_mono_single(account):
                 ]
                 if write_to_sheet(ws, row_data):
                     added += 1
-                    logger.debug(f"    ✓ Wrote payment: {row_id} - {s.get('description', 'N/A')}")
+                    logger.debug(f"    ✓ Wrote payment: {row_id}")
                 else:
                     logger.error(f"    ✗ Failed to write payment: {row_id}")
-        
-        if not found_existing and added == 0:
-            logger.warning(f"⚠ No new payments to add, but also no existing payments found")
         
         logger.info(f"✓ {sheet_name}: {added} rows added")
         return added
@@ -210,10 +244,13 @@ def import_mono_single(account):
 
 def import_mono():
     """Імпортувати платежі з усіх Monobank рахунків"""
+    logger.info("\n🔍 Checking Monobank accounts...")
+    mono_accounts_to_process = [a for a in MONO_ACCOUNTS if a.get("token") and a.get("iban")]
+    logger.info(f"  Found {len(mono_accounts_to_process)} Monobank account(s) to process")
+    
     total = 0
-    for account in MONO_ACCOUNTS:
-        if account.get("token") and account.get("iban"):
-            total += import_mono_single(account)
+    for account in mono_accounts_to_process:
+        total += import_mono_single(account)
     return total
 
 # ============================================================================
@@ -311,11 +348,10 @@ def import_novapay_single(account):
             
             try:
                 ws.find(row_id)
-                logger.info(f"  ✓ Found existing transaction at position {i}, stopping search (all prior transactions exist)")
+                logger.info(f"  ✓ Found existing transaction at position {i}, stopping search")
                 found_existing = True
                 break
             except:
-                # Не нашли - записываем и продолжаем
                 row_data = [
                     row_id,
                     s.get('date', ''),
@@ -327,12 +363,9 @@ def import_novapay_single(account):
                 ]
                 if write_to_sheet(ws, row_data):
                     added += 1
-                    logger.debug(f"    ✓ Wrote transaction: {row_id} - {s.get('description', 'N/A')}")
+                    logger.debug(f"    ✓ Wrote transaction: {row_id}")
                 else:
                     logger.error(f"    ✗ Failed to write transaction: {row_id}")
-        
-        if not found_existing and added == 0:
-            logger.warning(f"⚠ No new transactions to add, but also no existing transactions found")
         
         logger.info(f"✓ {sheet_name}: {added} rows added")
         return added
@@ -342,21 +375,109 @@ def import_novapay_single(account):
 
 def import_novapay():
     """Імпортувати платежі з усіх NovaPay рахунків"""
+    logger.info("\n🔍 Checking NovaPay accounts...")
+    novapay_accounts_to_process = [a for a in NOVAPAY_ACCOUNTS if a.get("login") and a.get("certificate") and a.get("refresh_token")]
+    logger.info(f"  Found {len(novapay_accounts_to_process)} NovaPay account(s) to process")
+    
     total = 0
-    for account in NOVAPAY_ACCOUNTS:
-        if account.get("login") and account.get("certificate") and account.get("refresh_token"):
-            total += import_novapay_single(account)
+    for account in novapay_accounts_to_process:
+        total += import_novapay_single(account)
     return total
 
 # ============================================================================
 # PRIVATBANK
 # ============================================================================
 
+def get_privatbank_statement():
+    """Отримати виписку з PrivatBank"""
+    try:
+        logger.info(f"  Fetching PrivatBank statements for account: {PB_ACC}...")
+        
+        from_time = int((datetime.now() - timedelta(days=60)).timestamp())
+        to_time = int(datetime.now().timestamp())
+        
+        url = f"https://api.privatbank.ua/p24api/statementxml"
+        params = {
+            "login": PB_ID,
+            "password": PB_TOKEN,
+            "account": PB_ACC,
+            "startDate": datetime.fromtimestamp(from_time).strftime("%d.%m.%Y"),
+            "endDate": datetime.fromtimestamp(to_time).strftime("%d.%m.%Y")
+        }
+        
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        
+        logger.info(f"  ✓ Got PrivatBank statement")
+        return resp.text
+    except Exception as e:
+        logger.error(f"  ✗ Error getting PrivatBank statement: {e}")
+        return None
+
 def import_privat():
     """Імпортувати платежі з PrivatBank"""
     logger.info("\n🏦 Processing PrivatBank")
-    logger.info("⚠ PrivatBank import not implemented yet")
-    return 0
+    
+    if not all([PB_ID, PB_TOKEN, PB_ACC]):
+        logger.warning("⚠ PrivatBank credentials not fully configured, skipping")
+        return 0
+    
+    try:
+        statement = get_privatbank_statement()
+        if not statement:
+            logger.warning("⚠ No PrivatBank statement received")
+            return 0
+        
+        # Парсим XML (простой парсер)
+        import xml.etree.ElementTree as ET
+        try:
+            root = ET.fromstring(statement)
+            transactions = root.findall('.//transaction')
+            logger.info(f"  ✓ Parsed {len(transactions)} transactions from XML")
+            
+            if not transactions:
+                logger.warning("⚠ No transactions found in PrivatBank statement")
+                return 0
+            
+            ws = worksheet("PrivatBank")
+            added = 0
+            found_existing = False
+            
+            logger.info(f"  Processing {len(transactions)} transactions...")
+            for i, trans in enumerate(transactions):
+                trans_id = trans.get('id')
+                row_id = f"pb_{trans_id}"
+                
+                try:
+                    ws.find(row_id)
+                    logger.info(f"  ✓ Found existing transaction at position {i}, stopping search")
+                    found_existing = True
+                    break
+                except:
+                    row_data = [
+                        row_id,
+                        trans.get('post'),
+                        trans.get('description', ''),
+                        float(trans.findtext('amount', 0)),
+                        trans.findtext('currency', ''),
+                        trans.get('status', '')
+                    ]
+                    if write_to_sheet(ws, row_data):
+                        added += 1
+                        logger.debug(f"    ✓ Wrote transaction: {row_id}")
+                    else:
+                        logger.error(f"    ✗ Failed to write transaction: {row_id}")
+            
+            logger.info(f"✓ PrivatBank: {added} rows added")
+            return added
+            
+        except ET.ParseError as e:
+            logger.error(f"  ✗ Failed to parse XML: {e}")
+            return 0
+            
+    except Exception as e:
+        logger.error(f"✗ Error importing PrivatBank: {e}", exc_info=True)
+        return 0
 
 # ============================================================================
 # MAIN
@@ -369,6 +490,8 @@ def main():
     logger.info("="*60)
     
     try:
+        log_initialization()
+        
         privat_added = import_privat()
         mono_added = import_mono()
         novapay_added = import_novapay()
