@@ -6,6 +6,9 @@ from datetime import datetime, timedelta
 from google.oauth2.service_account import Credentials
 import logging
 from functools import lru_cache
+import xml.etree.ElementTree as ET
+import uuid
+import html
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -75,21 +78,21 @@ def log_initialization():
     logger.info(f"  PB_TOKEN:                  {'✓ SET' if PB_TOKEN else '✗ NOT SET'}")
     logger.info(f"  PB_ACC:                    {'✓ SET' if PB_ACC else '✗ NOT SET'}")
     logger.info(f"  GOOGLE_SERVICE_ACCOUNT:    {'✓ SET' if GOOGLE_SERVICE_ACCOUNT else '✗ NOT SET'}")
-    
+
     logger.info("\n📦 ACCOUNTS CONFIGURATION:")
     logger.info(f"  Monobank accounts configured: {len([a for a in MONO_ACCOUNTS if a.get('token') and a.get('iban')])}/{len(MONO_ACCOUNTS)}")
     for i, acc in enumerate(MONO_ACCOUNTS):
         has_token = bool(acc.get('token'))
         has_iban = bool(acc.get('iban'))
         logger.info(f"    Account {i+1} ({acc.get('sheet')}): token={has_token}, iban={has_iban}")
-    
+
     logger.info(f"  NovaPay accounts configured: {len([a for a in NOVAPAY_ACCOUNTS if a.get('login') and a.get('certificate') and a.get('refresh_token')])}/{len(NOVAPAY_ACCOUNTS)}")
     for i, acc in enumerate(NOVAPAY_ACCOUNTS):
         has_login = bool(acc.get('login'))
         has_cert = bool(acc.get('certificate'))
         has_token = bool(acc.get('refresh_token'))
         logger.info(f"    Account {i+1} ({acc.get('sheet')}): login={has_login}, cert={has_cert}, token={has_token}")
-    
+
     logger.info(f"  PrivatBank configured: {'✓ YES' if all([PB_ID, PB_TOKEN, PB_ACC]) else '✗ NO'}")
 
 # ============================================================================
@@ -148,14 +151,14 @@ def get_monobank_account_id(token, iban):
         logger.debug(f"  Fetching Monobank account ID for IBAN: {iban}")
         resp = requests.get("https://api.monobank.ua/personal/client-info", headers=headers, timeout=10)
         resp.raise_for_status()
-        
+
         data = resp.json()
         for account in data.get("accounts", []):
             if account.get("iban") == iban:
                 account_id = account.get("id")
                 logger.info(f"  ✓ Found Monobank account ID: {account_id}")
                 return account_id
-        
+
         logger.error(f"  ✗ IBAN {iban} not found in Monobank accounts")
         return None
     except Exception as e:
@@ -167,16 +170,18 @@ def get_monobank_statements(token, account_id):
     try:
         headers = {"X-Token": token}
         from_time = int((datetime.now() - timedelta(days=60)).timestamp())
+        to_time = int(datetime.now().timestamp())
         from_date = datetime.fromtimestamp(from_time).strftime("%Y-%m-%d")
-        
-        logger.info(f"  Fetching Monobank statements from {from_date}...")
+        to_date = datetime.fromtimestamp(to_time).strftime("%Y-%m-%d")
+
+        logger.info(f"  Fetching Monobank statements from {from_date} to {to_date}...")
         resp = requests.get(
-            f"https://api.monobank.ua/personal/statement/{account_id}/{from_time}",
+            f"https://api.monobank.ua/personal/statement/{account_id}/{from_time}/{to_time}",
             headers=headers,
             timeout=10
         )
         resp.raise_for_status()
-        
+
         statements = resp.json()
         logger.info(f"  ✓ Got {len(statements)} statements from Monobank")
         return statements
@@ -189,32 +194,32 @@ def import_mono_single(account):
     token = account.get("token")
     iban = account.get("iban")
     sheet_name = account.get("sheet")
-    
+
     logger.info(f"\n📱 Processing Monobank: {sheet_name}")
-    
+
     if not token or not iban:
         logger.error(f"✗ Missing token or IBAN for account: {iban}")
         return 0
-    
+
     try:
         account_id = get_monobank_account_id(token, iban)
         if not account_id:
             logger.error(f"✗ Could not get account ID for {iban}")
             return 0
-        
+
         statements = get_monobank_statements(token, account_id)
         if not statements:
             logger.warning(f"⚠ No statements found for {sheet_name}")
             return 0
-        
+
         ws = worksheet(sheet_name)
         added = 0
         found_existing = False
-        
+
         logger.info(f"  Processing {len(statements)} statements...")
         for i, s in enumerate(statements):
             row_id = f"mono_{account_id}_{s.get('id')}"
-            
+
             try:
                 ws.find(row_id)
                 logger.info(f"  ✓ Found existing payment at position {i}, stopping search")
@@ -235,7 +240,7 @@ def import_mono_single(account):
                     logger.debug(f"    ✓ Wrote payment: {row_id}")
                 else:
                     logger.error(f"    ✗ Failed to write payment: {row_id}")
-        
+
         logger.info(f"✓ {sheet_name}: {added} rows added")
         return added
     except Exception as e:
@@ -247,69 +252,94 @@ def import_mono():
     logger.info("\n🔍 Checking Monobank accounts...")
     mono_accounts_to_process = [a for a in MONO_ACCOUNTS if a.get("token") and a.get("iban")]
     logger.info(f"  Found {len(mono_accounts_to_process)} Monobank account(s) to process")
-    
+
     total = 0
     for account in mono_accounts_to_process:
         total += import_mono_single(account)
     return total
 
 # ============================================================================
-# NOVAPAY
+# NOVAPAY (SOAP API)
 # ============================================================================
+
+def novapay_soap_call(method, body):
+    """Виконати SOAP запит до NovaPay"""
+    try:
+        headers = {
+            "Content-Type": "text/xml; charset=utf-8",
+            "SOAPAction": f"http://business.novapay.ua/{method}"
+        }
+
+        soap_envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://business.novapay.ua/">
+  <soap:Body>
+    <tem:{method}>
+      {body}
+    </tem:{method}>
+  </soap:Body>
+</soap:Envelope>"""
+
+        resp = requests.post(
+            "https://business.novapay.ua/Services/ClientAPIService.svc",
+            data=soap_envelope,
+            headers=headers,
+            timeout=10
+        )
+        resp.raise_for_status()
+        return resp.text
+    except Exception as e:
+        logger.error(f"  ✗ SOAP call failed for {method}: {e}")
+        return None
 
 def get_novapay_jwt(login, certificate, refresh_token):
     """Отримати JWT токен для NovaPay"""
     try:
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "login": login,
-            "certificate": certificate,
-            "refresh_token": refresh_token
-        }
-        
         logger.debug(f"  Getting JWT for NovaPay account: {login}")
-        resp = requests.post(
-            "https://business.novapay.ua/api/auth/jwt",
-            json=payload,
-            headers=headers,
-            timeout=10
-        )
-        resp.raise_for_status()
-        jwt = resp.json().get("jwt")
-        logger.info(f"  ✓ Got JWT token for {login}")
-        return jwt
+
+        body = f"""<tem:request_ref>{html.escape(str(uuid.uuid4()))}</tem:request_ref>
+      <tem:refresh_token>{html.escape(refresh_token)}</tem:refresh_token>
+      <tem:login>{html.escape(login)}</tem:login>
+      <tem:public_certificate>{html.escape(certificate)}</tem:public_certificate>"""
+
+        response = novapay_soap_call("UserAuthenticationJWT", body)
+        if not response:
+            return None
+
+        root = ET.fromstring(response)
+        jwt_elem = root.find('.//{http://business.novapay.ua/}jwt')
+        if jwt_elem is not None and jwt_elem.text:
+            logger.info(f"  ✓ Got JWT token for {login}")
+            return jwt_elem.text
+        else:
+            logger.error(f"  ✗ JWT not found in NovaPay response")
+            return None
+
     except Exception as e:
         logger.error(f"  ✗ Error getting NovaPay JWT: {e}")
         return None
 
-def get_novapay_statements(jwt_token):
+def get_novapay_statements(jwt_token, login):
     """Отримати виписку з NovaPay"""
     try:
-        headers = {
-            "Authorization": f"Bearer {jwt_token}",
-            "Content-Type": "application/json"
-        }
-        
-        from_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-        to_date = datetime.now().strftime("%Y-%m-%d")
-        
+        from_date = (datetime.now() - timedelta(days=60)).strftime("%d.%m.%Y")
+        to_date = datetime.now().strftime("%d.%m.%Y")
+
         logger.info(f"  Fetching NovaPay transactions from {from_date} to {to_date}...")
-        payload = {
-            "from": from_date,
-            "to": to_date
-        }
-        
-        resp = requests.post(
-            "https://business.novapay.ua/api/transactions",
-            json=payload,
-            headers=headers,
-            timeout=10
-        )
-        resp.raise_for_status()
-        
-        transactions = resp.json().get("transactions", [])
+
+        body = f"""<tem:jwt>{html.escape(jwt_token)}</tem:jwt>
+      <tem:login>{html.escape(login)}</tem:login>
+      <tem:dateFrom>{html.escape(from_date)}</tem:dateFrom>
+      <tem:dateTo>{html.escape(to_date)}</tem:dateTo>"""
+
+        response = novapay_soap_call("GetDocuments", body)
+        if not response:
+            return []
+
+        root = ET.fromstring(response)
+        transactions = root.findall('.//{http://business.novapay.ua/}Document')
         logger.info(f"  ✓ Got {len(transactions)} transactions from NovaPay")
         return transactions
+
     except Exception as e:
         logger.error(f"  ✗ Error getting NovaPay statements: {e}")
         return []
@@ -320,53 +350,54 @@ def import_novapay_single(account):
     sheet_name = account.get("sheet")
     certificate = account.get("certificate")
     refresh_token = account.get("refresh_token")
-    
+
     logger.info(f"\n💳 Processing NovaPay: {sheet_name}")
-    
+
     if not all([login, certificate, refresh_token]):
         logger.error(f"✗ Missing credentials for {login}")
         return 0
-    
+
     try:
         jwt = get_novapay_jwt(login, certificate, refresh_token)
         if not jwt:
             logger.error(f"✗ Failed to get JWT for {login}")
             return 0
-        
-        statements = get_novapay_statements(jwt)
+
+        statements = get_novapay_statements(jwt, login)
         if not statements:
             logger.warning(f"⚠ No transactions found for {sheet_name}")
             return 0
-        
+
         ws = worksheet(sheet_name)
         added = 0
         found_existing = False
-        
+
         logger.info(f"  Processing {len(statements)} transactions...")
         for i, s in enumerate(statements):
-            row_id = f"nova_{login}_{s.get('id')}"
-            
+            trans_id = s.get('id') or s.findtext('{http://business.novapay.ua/}Code', '')
+            row_id = f"nova_{login}_{trans_id}"
+
             try:
                 ws.find(row_id)
                 logger.info(f"  ✓ Found existing transaction at position {i}, stopping search")
                 found_existing = True
                 break
             except:
+                amount = s.findtext('{http://business.novapay.ua/}Amount') or s.get('Amount') or '0'
                 row_data = [
                     row_id,
-                    s.get('date', ''),
-                    s.get('type', ''),
-                    s.get('description', ''),
-                    s.get('amount', 0),
-                    s.get('currency', ''),
-                    s.get('status', '')
+                    s.findtext('{http://business.novapay.ua/}DayDate') or s.findtext('{http://business.novapay.ua/}PayDate') or '',
+                    s.findtext('{http://business.novapay.ua/}Code') or '',
+                    float(amount),
+                    s.findtext('{http://business.novapay.ua/}PaymentType') or '',
+                    s.findtext('{http://business.novapay.ua/}Purpose') or '',
                 ]
                 if write_to_sheet(ws, row_data):
                     added += 1
                     logger.debug(f"    ✓ Wrote transaction: {row_id}")
                 else:
                     logger.error(f"    ✗ Failed to write transaction: {row_id}")
-        
+
         logger.info(f"✓ {sheet_name}: {added} rows added")
         return added
     except Exception as e:
@@ -378,7 +409,7 @@ def import_novapay():
     logger.info("\n🔍 Checking NovaPay accounts...")
     novapay_accounts_to_process = [a for a in NOVAPAY_ACCOUNTS if a.get("login") and a.get("certificate") and a.get("refresh_token")]
     logger.info(f"  Found {len(novapay_accounts_to_process)} NovaPay account(s) to process")
-    
+
     total = 0
     for account in novapay_accounts_to_process:
         total += import_novapay_single(account)
@@ -392,23 +423,24 @@ def get_privatbank_statement():
     """Отримати виписку з PrivatBank"""
     try:
         logger.info(f"  Fetching PrivatBank statements for account: {PB_ACC}...")
-        
-        from_time = int((datetime.now() - timedelta(days=60)).timestamp())
-        to_time = int(datetime.now().timestamp())
-        
+
+        from_date = (datetime.now() - timedelta(days=60)).strftime("%d.%m.%Y")
+        to_date = datetime.now().strftime("%d.%m.%Y")
+
         url = f"https://api.privatbank.ua/p24api/statementxml"
         params = {
             "login": PB_ID,
             "password": PB_TOKEN,
             "account": PB_ACC,
-            "startDate": datetime.fromtimestamp(from_time).strftime("%d.%m.%Y"),
-            "endDate": datetime.fromtimestamp(to_time).strftime("%d.%m.%Y")
+            "startDate": from_date,
+            "endDate": to_date
         }
-        
+
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
-        
-        logger.info(f"  ✓ Got PrivatBank statement")
+
+        logger.info(f"  ✓ Got PrivatBank statement (length: {len(resp.text)} chars)")
+        logger.debug(f"  Response preview: {resp.text[:200]}")
         return resp.text
     except Exception as e:
         logger.error(f"  ✗ Error getting PrivatBank statement: {e}")
@@ -417,37 +449,35 @@ def get_privatbank_statement():
 def import_privat():
     """Імпортувати платежі з PrivatBank"""
     logger.info("\n🏦 Processing PrivatBank")
-    
+
     if not all([PB_ID, PB_TOKEN, PB_ACC]):
         logger.warning("⚠ PrivatBank credentials not fully configured, skipping")
         return 0
-    
+
     try:
         statement = get_privatbank_statement()
         if not statement:
             logger.warning("⚠ No PrivatBank statement received")
             return 0
-        
-        # Парсим XML (простой парсер)
-        import xml.etree.ElementTree as ET
+
         try:
             root = ET.fromstring(statement)
             transactions = root.findall('.//transaction')
             logger.info(f"  ✓ Parsed {len(transactions)} transactions from XML")
-            
+
             if not transactions:
                 logger.warning("⚠ No transactions found in PrivatBank statement")
                 return 0
-            
+
             ws = worksheet("PrivatBank")
             added = 0
             found_existing = False
-            
+
             logger.info(f"  Processing {len(transactions)} transactions...")
             for i, trans in enumerate(transactions):
                 trans_id = trans.get('id')
                 row_id = f"pb_{trans_id}"
-                
+
                 try:
                     ws.find(row_id)
                     logger.info(f"  ✓ Found existing transaction at position {i}, stopping search")
@@ -467,14 +497,15 @@ def import_privat():
                         logger.debug(f"    ✓ Wrote transaction: {row_id}")
                     else:
                         logger.error(f"    ✗ Failed to write transaction: {row_id}")
-            
+
             logger.info(f"✓ PrivatBank: {added} rows added")
             return added
-            
+
         except ET.ParseError as e:
             logger.error(f"  ✗ Failed to parse XML: {e}")
+            logger.error(f"  Response content (first 500 chars): {statement[:500]}")
             return 0
-            
+
     except Exception as e:
         logger.error(f"✗ Error importing PrivatBank: {e}", exc_info=True)
         return 0
@@ -488,14 +519,14 @@ def main():
     logger.info("="*60)
     logger.info("🚀 STARTING PAYMENT IMPORT")
     logger.info("="*60)
-    
+
     try:
         log_initialization()
-        
+
         privat_added = import_privat()
         mono_added = import_mono()
         novapay_added = import_novapay()
-        
+
         logger.info("\n" + "="*60)
         logger.info("✓ IMPORT COMPLETED SUCCESSFULLY")
         logger.info("="*60)
@@ -505,7 +536,7 @@ def main():
         logger.info(f"     NovaPay:       {novapay_added} transactions")
         logger.info(f"     TOTAL:         {privat_added + mono_added + novapay_added} transactions")
         logger.info("="*60)
-        
+
     except Exception as e:
         logger.error("="*60)
         logger.error("✗ FATAL ERROR")
