@@ -1,3 +1,4 @@
+import hashlib
 import html
 import json
 import logging
@@ -9,7 +10,6 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import gspread
@@ -30,26 +30,17 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# CONSTANTS
+# GENERAL CONFIGURATION
 # =============================================================================
 
 SPREADSHEET_ID = "1KujvD6_Z6r0474URqHbjlWZthEW_XDqHa1IwtZ0PsqY"
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
+
 IMPORT_DAYS = 30
 
-PRIVAT_SHEET = "Privat"
-MONO_SHEET_1 = "Monobank"
-MONO_SHEET_2 = "MonoBank Сергій"
-NOVAPAY_SHEET_1 = "NovaPay Анастасія"
-NOVAPAY_SHEET_2 = "NovaPay Сергій"
-
-NOVAPAY_CONFIG_SHEET = "NovaPay_Config"
-LOG_SHEET = "Logs"
-
-NOVAPAY_ENDPOINT = (
-    "https://business.novapay.ua/Services/ClientAPIService.svc"
-)
+HTTP_TIMEOUT_SECONDS = 90
+HTTP_RETRIES = 5
 
 RETRYABLE_HTTP_CODES = {
     408,
@@ -61,15 +52,43 @@ RETRYABLE_HTTP_CODES = {
     504,
 }
 
-HTTP_TIMEOUT_SECONDS = 90
-HTTP_RETRIES = 5
+NON_RETRYABLE_HTTP_CODES = {
+    400,
+    401,
+    403,
+    404,
+    405,
+    409,
+    422,
+}
+
+PRIVAT_SHEET = "Privat"
+
+MONO_SHEET_1 = "Monobank"
+MONO_SHEET_2 = "MonoBank Сергій"
+
+NOVAPAY_SHEET_1 = "NovaPay Анастасія"
+NOVAPAY_SHEET_2 = "NovaPay Сергій"
+
+NOVAPAY_CONFIG_SHEET = "NovaPay_Config"
+
+LOG_SHEET = "Logs"
+STATE_SHEET = "Import_State"
+
+NOVAPAY_ENDPOINT = (
+    "https://business.novapay.ua/"
+    "Services/ClientAPIService.svc"
+)
 
 
 # =============================================================================
 # ENVIRONMENT VARIABLES
 # =============================================================================
 
-GOOGLE_SERVICE_ACCOUNT = os.getenv("GOOGLE_SERVICE_ACCOUNT", "").strip()
+GOOGLE_SERVICE_ACCOUNT = os.getenv(
+    "GOOGLE_SERVICE_ACCOUNT",
+    "",
+).strip()
 
 PB_ID = os.getenv("PB_ID", "").strip()
 PB_TOKEN = os.getenv("PB_TOKEN", "").strip()
@@ -81,60 +100,81 @@ MONO_IBAN_1 = os.getenv("MONO_IBAN_1", "").strip()
 MONO_TOKEN_2 = os.getenv("MONO_TOKEN_2", "").strip()
 MONO_IBAN_2 = os.getenv("MONO_IBAN_2", "").strip()
 
-NOVAPAY_LOGIN = os.getenv("NOVAPAY_LOGIN", "").strip()
+NOVAPAY_LOGIN = os.getenv(
+    "NOVAPAY_LOGIN",
+    "",
+).strip()
+
 NOVAPAY_REFRESH_TOKEN = os.getenv(
     "NOVAPAY_REFRESH_TOKEN",
     "",
 ).strip()
+
 NOVAPAY_PUBLIC_CERTIFICATE = os.getenv(
     "NOVAPAY_PUBLIC_CERTIFICATE",
     "",
 ).strip()
 
-NOVAPAY_LOGIN_2 = os.getenv("NOVAPAY_LOGIN_2", "").strip()
+NOVAPAY_LOGIN_2 = os.getenv(
+    "NOVAPAY_LOGIN_2",
+    "",
+).strip()
+
 NOVAPAY_REFRESH_TOKEN_2 = os.getenv(
     "NOVAPAY_REFRESH_TOKEN_2",
     "",
 ).strip()
+
 NOVAPAY_PUBLIC_CERTIFICATE_2 = os.getenv(
     "NOVAPAY_PUBLIC_CERTIFICATE_2",
     "",
 ).strip()
 
 
+# =============================================================================
+# ACCOUNT CONFIGURATION
+# =============================================================================
+
 MONO_ACCOUNTS = [
     {
-        "name": "Monobank",
+        "integration": "Monobank",
         "sheet": MONO_SHEET_1,
         "token": MONO_TOKEN_1,
         "iban": MONO_IBAN_1,
     },
     {
-        "name": "Monobank Сергій",
+        "integration": "MonoBank Сергій",
         "sheet": MONO_SHEET_2,
         "token": MONO_TOKEN_2,
         "iban": MONO_IBAN_2,
     },
 ]
 
-
 NOVAPAY_ACCOUNTS = [
     {
-        "config_column": 2,
-        "name": "NovaPay Анастасія",
+        "integration": "NovaPay Анастасія",
         "sheet": NOVAPAY_SHEET_1,
         "login": NOVAPAY_LOGIN,
+        "config_column": 2,
         "initial_refresh_token": NOVAPAY_REFRESH_TOKEN,
         "initial_certificate": NOVAPAY_PUBLIC_CERTIFICATE,
     },
     {
-        "config_column": 3,
-        "name": "NovaPay Сергій",
+        "integration": "NovaPay Сергій",
         "sheet": NOVAPAY_SHEET_2,
         "login": NOVAPAY_LOGIN_2,
+        "config_column": 3,
         "initial_refresh_token": NOVAPAY_REFRESH_TOKEN_2,
         "initial_certificate": NOVAPAY_PUBLIC_CERTIFICATE_2,
     },
+]
+
+ALL_INTEGRATIONS = [
+    "Privat",
+    "Monobank",
+    "MonoBank Сергій",
+    "NovaPay Анастасія",
+    "NovaPay Сергій",
 ]
 
 
@@ -146,7 +186,15 @@ def kyiv_now() -> datetime:
     return datetime.now(KYIV_TZ)
 
 
-def date_range_30_days() -> tuple[datetime, datetime]:
+def today_key() -> str:
+    return kyiv_now().strftime("%d.%m.%Y")
+
+
+def current_datetime_text() -> str:
+    return kyiv_now().strftime("%d.%m.%Y %H:%M:%S")
+
+
+def get_import_range() -> tuple[datetime, datetime]:
     end = kyiv_now()
     start = end - timedelta(days=IMPORT_DAYS - 1)
     return start, end
@@ -155,12 +203,8 @@ def date_range_30_days() -> tuple[datetime, datetime]:
 def require_value(name: str, value: str) -> None:
     if not value:
         raise RuntimeError(
-            f"Не задано обов'язкову змінну середовища: {name}"
+            f"Не задана обязательная переменная: {name}"
         )
-
-
-def secret_status(value: str) -> str:
-    return "✓ SET" if value else "✗ NOT SET"
 
 
 def clean_text(value: Any) -> str:
@@ -170,11 +214,54 @@ def clean_text(value: Any) -> str:
     return str(value).strip()
 
 
+def truncate_text(
+    value: Any,
+    max_length: int = 1500,
+) -> str:
+    text = clean_text(value)
+
+    if len(text) <= max_length:
+        return text
+
+    return text[:max_length] + "..."
+
+
+def secret_status(value: str) -> str:
+    return "✓ SET" if value else "✗ NOT SET"
+
+
+def safe_fingerprint(value: Any) -> str:
+    """
+    Не выводит сам секрет.
+
+    Показывает только:
+    - длину;
+    - первые 10 символов SHA-256.
+    """
+
+    text = clean_text(value)
+
+    if not text:
+        return "EMPTY"
+
+    digest = hashlib.sha256(
+        text.encode("utf-8")
+    ).hexdigest()[:10]
+
+    return f"len={len(text)}, sha256={digest}"
+
+
 def parse_decimal(value: Any) -> float:
-    text = clean_text(value).replace(" ", "").replace(",", ".")
+    text = clean_text(value)
 
     if not text:
         return 0.0
+
+    text = (
+        text
+        .replace(" ", "")
+        .replace(",", ".")
+    )
 
     return float(text)
 
@@ -193,8 +280,8 @@ def parse_date_value(value: Any) -> datetime | None:
         "%d-%m-%Y %H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S.%f",
         "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%f",
     ]
 
     for pattern in patterns:
@@ -215,38 +302,35 @@ def format_date(value: Any) -> str:
     text = clean_text(value)
 
     if len(text) >= 10:
-        first_ten = text[:10]
+        possible_iso_date = text[:10]
 
-        if (
-            len(first_ten) == 10
-            and first_ten[4] == "-"
-            and first_ten[7] == "-"
-        ):
-            try:
-                parsed = datetime.strptime(
-                    first_ten,
-                    "%Y-%m-%d",
-                )
-                return parsed.strftime("%d.%m.%Y")
-            except ValueError:
-                pass
+        try:
+            parsed = datetime.strptime(
+                possible_iso_date,
+                "%Y-%m-%d",
+            )
+
+            return parsed.strftime("%d.%m.%Y")
+
+        except ValueError:
+            pass
 
     return text
-
-
-def format_log_date() -> str:
-    return kyiv_now().strftime("%d.%m.%Y %H:%M:%S")
 
 
 def local_xml_name(tag: str) -> str:
     return tag.split("}")[-1]
 
 
-def direct_children_map(element: ET.Element) -> dict[str, str]:
+def direct_children_map(
+    element: ET.Element,
+) -> dict[str, str]:
     result: dict[str, str] = {}
 
     for child in list(element):
-        result[local_xml_name(child.tag)] = clean_text(child.text)
+        result[local_xml_name(child.tag)] = clean_text(
+            child.text
+        )
 
     return result
 
@@ -280,20 +364,8 @@ def xml_to_string(root: ET.Element) -> str:
     )
 
 
-def truncate_text(
-    value: str,
-    max_length: int = 1200,
-) -> str:
-    value = clean_text(value)
-
-    if len(value) <= max_length:
-        return value
-
-    return value[:max_length] + "..."
-
-
 # =============================================================================
-# HTTP WITH RETRIES
+# HTTP
 # =============================================================================
 
 def request_with_retry(
@@ -306,7 +378,7 @@ def request_with_retry(
     json_body: Any = None,
     timeout: int = HTTP_TIMEOUT_SECONDS,
     retries: int = HTTP_RETRIES,
-    return_soap_fault: bool = False,
+    allow_soap_fault_500: bool = False,
 ) -> requests.Response:
     delay = 5
     last_error: Exception | None = None
@@ -324,7 +396,7 @@ def request_with_retry(
             )
 
             if (
-                return_soap_fault
+                allow_soap_fault_500
                 and response.status_code == 500
                 and (
                     "<Fault" in response.text
@@ -332,6 +404,12 @@ def request_with_retry(
                 )
             ):
                 return response
+
+            if response.status_code in NON_RETRYABLE_HTTP_CODES:
+                raise RuntimeError(
+                    f"HTTP {response.status_code}: "
+                    f"{truncate_text(response.text)}"
+                )
 
             if response.status_code in RETRYABLE_HTTP_CODES:
                 last_error = RuntimeError(
@@ -341,10 +419,13 @@ def request_with_retry(
 
                 if attempt < retries:
                     retry_after = response.headers.get(
-                        "Retry-After",
+                        "Retry-After"
                     )
 
-                    if retry_after and retry_after.isdigit():
+                    if (
+                        retry_after
+                        and retry_after.isdigit()
+                    ):
                         wait_seconds = max(
                             int(retry_after),
                             delay,
@@ -361,11 +442,20 @@ def request_with_retry(
                     )
 
                     time.sleep(wait_seconds)
-                    delay = min(delay * 2, 120)
+
+                    delay = min(
+                        delay * 2,
+                        120,
+                    )
+
                     continue
 
             response.raise_for_status()
+
             return response
+
+        except RuntimeError:
+            raise
 
         except requests.HTTPError as exc:
             status_code = (
@@ -373,49 +463,47 @@ def request_with_retry(
                 if exc.response is not None
                 else None
             )
-        
-            if status_code in (400, 401, 403, 404):
+
+            response_text = (
+                exc.response.text
+                if exc.response is not None
+                else str(exc)
+            )
+
+            if status_code in NON_RETRYABLE_HTTP_CODES:
                 raise RuntimeError(
                     f"HTTP {status_code}: "
-                    f"{truncate_text(exc.response.text if exc.response is not None else str(exc))}"
+                    f"{truncate_text(response_text)}"
                 ) from exc
-        
+
             last_error = exc
-        
+
             if attempt >= retries:
                 break
-        
+
             logger.warning(
-                "Помилка HTTP-запиту. Повтор %s/%s через %s секунд: %s",
+                "HTTP error. Retry %s/%s in %s seconds: %s",
                 attempt,
                 retries,
                 delay,
                 exc,
             )
-        
+
             time.sleep(delay)
-            delay = min(delay * 2, 120)
-        
+
+            delay = min(
+                delay * 2,
+                120,
+            )
+
         except requests.RequestException as exc:
             last_error = exc
-        
+
             if attempt >= retries:
                 break
-        
-            logger.warning(
-                "Помилка мережевого запиту. Повтор %s/%s через %s секунд: %s",
-                attempt,
-                retries,
-                delay,
-                exc,
-            )
-        
-            time.sleep(delay)
-            delay = min(delay * 2, 120)
 
             logger.warning(
-                "Помилка HTTP-запиту. Повтор %s/%s "
-                "через %s секунд: %s",
+                "Network error. Retry %s/%s in %s seconds: %s",
                 attempt,
                 retries,
                 delay,
@@ -423,10 +511,14 @@ def request_with_retry(
             )
 
             time.sleep(delay)
-            delay = min(delay * 2, 120)
+
+            delay = min(
+                delay * 2,
+                120,
+            )
 
     raise RuntimeError(
-        f"HTTP-запит не виконано після {retries} спроб: "
+        f"HTTP request failed after {retries} attempts: "
         f"{last_error}"
     )
 
@@ -443,16 +535,18 @@ def get_spreadsheet() -> gspread.Spreadsheet:
     )
 
     try:
-        credentials_info = json.loads(
+        service_account_info = json.loads(
             GOOGLE_SERVICE_ACCOUNT
         )
+
     except json.JSONDecodeError as exc:
         raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT містить невалідний JSON"
+            "GOOGLE_SERVICE_ACCOUNT содержит "
+            "невалидный JSON"
         ) from exc
 
     credentials = Credentials.from_service_account_info(
-        credentials_info,
+        service_account_info,
         scopes=[
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
@@ -474,9 +568,10 @@ def get_or_create_worksheet(
 
     try:
         return spreadsheet.worksheet(sheet_name)
+
     except gspread.WorksheetNotFound:
         logger.warning(
-            "Аркуш '%s' не знайдений. Створюю.",
+            "Worksheet '%s' not found. Creating.",
             sheet_name,
         )
 
@@ -485,6 +580,19 @@ def get_or_create_worksheet(
             rows=rows,
             cols=cols,
         )
+
+
+def append_rows_batch(
+    worksheet: gspread.Worksheet,
+    rows: list[list[Any]],
+) -> None:
+    if not rows:
+        return
+
+    worksheet.append_rows(
+        rows,
+        value_input_option="USER_ENTERED",
+    )
 
 
 def load_existing_values(
@@ -505,76 +613,75 @@ def load_existing_values(
     }
 
 
-def append_rows_batch(
-    worksheet: gspread.Worksheet,
-    rows: list[list[Any]],
-) -> None:
-    if not rows:
-        return
-
-    worksheet.append_rows(
-        rows,
-        value_input_option="USER_ENTERED",
-    )
-
-
 # =============================================================================
-# HEADERS
+# SHEET HEADERS
 # =============================================================================
 
 def ensure_privat_header(
     worksheet: gspread.Worksheet,
 ) -> None:
-    if not worksheet.get_all_values():
-        worksheet.append_row([
-            "№",
-            "Дата проводки",
-            "Тип операції",
-            "Сума",
-            "Валюта",
-            "Назва контрагента",
-            "Призначення платежу",
-            "Рахунок контрагента",
-        ])
+    values = worksheet.get_all_values()
+
+    if values:
+        return
+
+    worksheet.append_row([
+        "№",
+        "Дата проводки",
+        "Тип операції",
+        "Сума",
+        "Валюта",
+        "Назва контрагента",
+        "Призначення платежу",
+        "Рахунок контрагента",
+    ])
 
 
 def ensure_mono_header(
     worksheet: gspread.Worksheet,
 ) -> None:
-    if not worksheet.get_all_values():
-        worksheet.append_row([
-            "id",
-            "iban",
-            "time",
-            "description",
-            "amount",
-            "direction",
-            "currencyCode",
-            "balance",
-            "mcc",
-            "comment",
-            "counterEdrpou",
-            "counterIban",
-        ])
+    values = worksheet.get_all_values()
+
+    if values:
+        return
+
+    worksheet.append_row([
+        "id",
+        "iban",
+        "time",
+        "description",
+        "amount",
+        "direction",
+        "currencyCode",
+        "balance",
+        "mcc",
+        "comment",
+        "counterEdrpou",
+        "counterIban",
+    ])
 
 
 def ensure_novapay_header(
     worksheet: gspread.Worksheet,
 ) -> None:
-    if not worksheet.get_all_values():
-        worksheet.append_row([
-            "Дата платежу",
-            "Номер транзакції",
-            "Сума",
-            "Тип",
-            "Призначення платежу",
-        ])
+    values = worksheet.get_all_values()
+
+    if values:
+        return
+
+    worksheet.append_row([
+        "Дата платежу",
+        "Номер транзакції",
+        "Сума",
+        "Тип",
+        "Призначення платежу",
+    ])
 
 
-def ensure_log_header(
+def ensure_logs_header(
     worksheet: gspread.Worksheet,
 ) -> None:
-    expected = [
+    expected_header = [
         "Дата виконання",
         "Privat",
         "Monobank",
@@ -587,50 +694,145 @@ def ensure_log_header(
     values = worksheet.get_all_values()
 
     if not values:
-        worksheet.append_row(expected)
+        worksheet.append_row(expected_header)
         return
 
-    current_header = values[0]
-
-    if current_header != expected:
+    if values[0][:7] != expected_header:
         worksheet.update(
             range_name="A1:G1",
-            values=[expected],
+            values=[expected_header],
+        )
+
+
+def ensure_state_header(
+    worksheet: gspread.Worksheet,
+) -> None:
+    expected_header = [
+        "Дата",
+        "Интеграция",
+        "Статус",
+        "Добавлено строк",
+        "Время обновления",
+        "Ошибка",
+    ]
+
+    values = worksheet.get_all_values()
+
+    if not values:
+        worksheet.append_row(expected_header)
+        return
+
+    if values[0][:6] != expected_header:
+        worksheet.update(
+            range_name="A1:F1",
+            values=[expected_header],
         )
 
 
 # =============================================================================
-# EXECUTION LOG
+# DAILY INTEGRATION STATE
 # =============================================================================
 
-def already_success_today() -> bool:
+def get_state_sheet() -> gspread.Worksheet:
     worksheet = get_or_create_worksheet(
-        LOG_SHEET,
+        STATE_SHEET,
         rows=5000,
         cols=10,
     )
 
-    ensure_log_header(worksheet)
+    ensure_state_header(worksheet)
 
+    return worksheet
+
+
+def find_today_state_row(
+    integration_name: str,
+) -> tuple[int | None, list[str] | None]:
+    worksheet = get_state_sheet()
     rows = worksheet.get_all_values()
 
-    if len(rows) <= 1:
-        return False
+    date_value = today_key()
 
-    today = kyiv_now().strftime("%d.%m.%Y")
+    for row_number in range(
+        len(rows),
+        1,
+        -1,
+    ):
+        row = rows[row_number - 1]
 
-    for row in reversed(rows[1:]):
-        if len(row) < 7:
+        if len(row) < 3:
             continue
 
-        date_value = clean_text(row[0])
-        status = clean_text(row[6])
+        row_date = clean_text(row[0])
+        row_integration = clean_text(row[1])
 
-        if date_value.startswith(today) and status == "OK":
-            return True
+        if (
+            row_date == date_value
+            and row_integration == integration_name
+        ):
+            return row_number, row
 
-    return False
+    return None, None
 
+
+def integration_succeeded_today(
+    integration_name: str,
+) -> bool:
+    _, row = find_today_state_row(
+        integration_name
+    )
+
+    if not row or len(row) < 3:
+        return False
+
+    return clean_text(row[2]).upper() == "OK"
+
+
+def save_integration_state(
+    integration_name: str,
+    status: str,
+    added_rows: int,
+    error: str = "",
+) -> None:
+    worksheet = get_state_sheet()
+
+    row_number, _ = find_today_state_row(
+        integration_name
+    )
+
+    row_values = [
+        today_key(),
+        integration_name,
+        status,
+        added_rows,
+        current_datetime_text(),
+        truncate_text(error, 40000),
+    ]
+
+    if row_number is None:
+        worksheet.append_row(
+            row_values,
+            value_input_option="USER_ENTERED",
+        )
+
+        return
+
+    worksheet.update(
+        range_name=f"A{row_number}:F{row_number}",
+        values=[row_values],
+    )
+
+
+def all_integrations_succeeded_today() -> bool:
+    return all(
+        integration_succeeded_today(name)
+        for name in ALL_INTEGRATIONS
+    )
+
+
+# =============================================================================
+# GENERAL EXECUTION LOG
+# =============================================================================
 
 def write_execution_log(
     results: dict[str, int],
@@ -642,17 +844,17 @@ def write_execution_log(
         cols=10,
     )
 
-    ensure_log_header(worksheet)
+    ensure_logs_header(worksheet)
 
     worksheet.append_row(
         [
-            format_log_date(),
-            results.get(PRIVAT_SHEET, 0),
-            results.get(MONO_SHEET_1, 0),
-            results.get(MONO_SHEET_2, 0),
-            results.get(NOVAPAY_SHEET_1, 0),
-            results.get(NOVAPAY_SHEET_2, 0),
-            status,
+            current_datetime_text(),
+            results.get("Privat", 0),
+            results.get("Monobank", 0),
+            results.get("MonoBank Сергій", 0),
+            results.get("NovaPay Анастасія", 0),
+            results.get("NovaPay Сергій", 0),
+            truncate_text(status, 40000),
         ],
         value_input_option="USER_ENTERED",
     )
@@ -669,7 +871,9 @@ def build_privat_transaction_id(
         clean_text(transaction.get("REF")),
         clean_text(transaction.get("REFN")),
         clean_text(
-            transaction.get("DATE_TIME_DAT_OD_TIM_P")
+            transaction.get(
+                "DATE_TIME_DAT_OD_TIM_P"
+            )
         ),
         clean_text(transaction.get("SUM")),
     ]
@@ -683,12 +887,12 @@ def build_privat_transaction_id(
 def privat_sort_key(
     transaction: dict[str, Any],
 ) -> datetime:
-    raw_date = transaction.get(
-        "DATE_TIME_DAT_OD_TIM_P",
-        "",
+    parsed = parse_date_value(
+        transaction.get(
+            "DATE_TIME_DAT_OD_TIM_P",
+            "",
+        )
     )
-
-    parsed = parse_date_value(raw_date)
 
     return parsed or datetime.min
 
@@ -714,43 +918,40 @@ def import_privatbank() -> int:
         1,
     )
 
-    start, end = date_range_30_days()
-
-    endpoint = (
-        "https://acp.privatbank.ua/api/"
-        "statements/transactions"
-    )
-
-    params = {
-        "acc": PB_ACC,
-        "startDate": start.strftime("%d-%m-%Y"),
-        "endDate": end.strftime("%d-%m-%Y"),
-        "limit": 500,
-    }
+    start, end = get_import_range()
 
     response = request_with_retry(
         "GET",
-        endpoint,
-        params=params,
+        (
+            "https://acp.privatbank.ua/"
+            "api/statements/transactions"
+        ),
+        params={
+            "acc": PB_ACC,
+            "startDate": start.strftime("%d-%m-%Y"),
+            "endDate": end.strftime("%d-%m-%Y"),
+            "limit": 500,
+        },
         headers={
             "id": PB_ID,
             "token": PB_TOKEN,
             "Accept": "application/json",
-            "User-Agent": "payments-bot/1.0",
+            "User-Agent": "payments-bot/2.0",
         },
     )
 
     try:
         payload = response.json()
+
     except ValueError as exc:
         raise RuntimeError(
-            "PrivatBank повернув не JSON: "
+            "PrivatBank returned non-JSON response: "
             f"{truncate_text(response.text)}"
         ) from exc
 
     if payload.get("status") != "SUCCESS":
         raise RuntimeError(
-            "Помилка PrivatBank API: "
+            "PrivatBank API error: "
             f"{truncate_text(json.dumps(payload, ensure_ascii=False))}"
         )
 
@@ -758,7 +959,7 @@ def import_privatbank() -> int:
 
     if not isinstance(transactions, list):
         raise RuntimeError(
-            "PrivatBank API не повернув масив transactions"
+            "PrivatBank response has no transactions list"
         )
 
     rows: list[list[Any]] = []
@@ -773,8 +974,9 @@ def import_privatbank() -> int:
 
         if not transaction_id:
             logger.warning(
-                "PrivatBank: пропущено операцію без ID"
+                "PrivatBank transaction without ID skipped"
             )
+
             continue
 
         if transaction_id in existing_ids:
@@ -788,13 +990,21 @@ def import_privatbank() -> int:
                     "",
                 )
             ),
-            clean_text(transaction.get("TRANTYPE")),
-            parse_decimal(transaction.get("SUM")),
-            clean_text(transaction.get("CCY")),
+            clean_text(
+                transaction.get("TRANTYPE")
+            ),
+            parse_decimal(
+                transaction.get("SUM")
+            ),
+            clean_text(
+                transaction.get("CCY")
+            ),
             clean_text(
                 transaction.get("AUT_CNTR_NAM")
             ),
-            clean_text(transaction.get("OSND")),
+            clean_text(
+                transaction.get("OSND")
+            ),
             clean_text(
                 transaction.get("AUT_CNTR_ACC")
             ),
@@ -802,7 +1012,10 @@ def import_privatbank() -> int:
 
         existing_ids.add(transaction_id)
 
-    append_rows_batch(worksheet, rows)
+    append_rows_batch(
+        worksheet,
+        rows,
+    )
 
     logger.info(
         "✓ PrivatBank: added %s row(s)",
@@ -826,28 +1039,29 @@ def get_monobank_account_id(
         headers={
             "X-Token": token,
             "Accept": "application/json",
-            "User-Agent": "payments-bot/1.0",
+            "User-Agent": "payments-bot/2.0",
         },
     )
 
     try:
         payload = response.json()
+
     except ValueError as exc:
         raise RuntimeError(
-            "Monobank client-info повернув не JSON"
+            "Monobank client-info returned non-JSON"
         ) from exc
 
     accounts = payload.get("accounts", [])
 
     for account in accounts:
-        account_iban = clean_text(account.get("iban"))
-
-        if account_iban == iban:
-            account_id = clean_text(account.get("id"))
+        if clean_text(account.get("iban")) == iban:
+            account_id = clean_text(
+                account.get("id")
+            )
 
             if not account_id:
                 raise RuntimeError(
-                    f"Monobank: у рахунку {iban} немає id"
+                    f"Monobank account {iban} has no id"
                 )
 
             return account_id
@@ -859,8 +1073,8 @@ def get_monobank_account_id(
     ]
 
     raise RuntimeError(
-        f"Monobank: IBAN {iban} не знайдений. "
-        f"Доступні IBAN: {available_ibans}"
+        f"Monobank IBAN {iban} not found. "
+        f"Available: {available_ibans}"
     )
 
 
@@ -869,38 +1083,44 @@ def get_monobank_statements(
     account_id: str,
 ) -> list[dict[str, Any]]:
     now_utc = datetime.now(timezone.utc)
+
     from_utc = now_utc - timedelta(
         days=IMPORT_DAYS - 1
     )
 
-    from_timestamp = int(from_utc.timestamp())
-    to_timestamp = int(now_utc.timestamp())
+    from_timestamp = int(
+        from_utc.timestamp()
+    )
 
-    endpoint = (
-        "https://api.monobank.ua/personal/statement/"
-        f"{account_id}/{from_timestamp}/{to_timestamp}"
+    to_timestamp = int(
+        now_utc.timestamp()
     )
 
     response = request_with_retry(
         "GET",
-        endpoint,
+        (
+            "https://api.monobank.ua/"
+            f"personal/statement/{account_id}/"
+            f"{from_timestamp}/{to_timestamp}"
+        ),
         headers={
             "X-Token": token,
             "Accept": "application/json",
-            "User-Agent": "payments-bot/1.0",
+            "User-Agent": "payments-bot/2.0",
         },
     )
 
     try:
         payload = response.json()
+
     except ValueError as exc:
         raise RuntimeError(
-            "Monobank statement повернув не JSON"
+            "Monobank statement returned non-JSON"
         ) from exc
 
     if not isinstance(payload, list):
         raise RuntimeError(
-            "Monobank statement повернув не масив: "
+            "Monobank statement returned unexpected data: "
             f"{truncate_text(json.dumps(payload, ensure_ascii=False))}"
         )
 
@@ -911,7 +1131,9 @@ def build_mono_transaction_id(
     iban: str,
     transaction: dict[str, Any],
 ) -> str:
-    original_id = clean_text(transaction.get("id"))
+    original_id = clean_text(
+        transaction.get("id")
+    )
 
     if original_id:
         return f"{iban}_{original_id}"
@@ -919,7 +1141,9 @@ def build_mono_transaction_id(
     fallback = "_".join([
         clean_text(transaction.get("time")),
         clean_text(transaction.get("amount")),
-        clean_text(transaction.get("description")),
+        clean_text(
+            transaction.get("description")
+        ),
     ])
 
     if not fallback.replace("_", ""):
@@ -931,23 +1155,36 @@ def build_mono_transaction_id(
 def import_monobank_account(
     account: dict[str, str],
 ) -> int:
+    integration_name = account["integration"]
     sheet_name = account["sheet"]
+
     token = clean_text(account["token"])
     iban = clean_text(account["iban"])
 
     require_value(
-        f"token for {sheet_name}",
+        f"{integration_name} token",
         token,
     )
+
     require_value(
-        f"IBAN for {sheet_name}",
+        f"{integration_name} IBAN",
         iban,
     )
 
     logger.info("")
     logger.info(
         "📱 Processing Monobank: %s",
-        sheet_name,
+        integration_name,
+    )
+
+    logger.info(
+        "  Token fingerprint: %s",
+        safe_fingerprint(token),
+    )
+
+    logger.info(
+        "  IBAN fingerprint: %s",
+        safe_fingerprint(iban),
     )
 
     account_id = get_monobank_account_id(
@@ -973,7 +1210,7 @@ def import_monobank_account(
         1,
     )
 
-    rows_with_time: list[
+    rows_with_timestamp: list[
         tuple[int, list[Any]]
     ] = []
 
@@ -985,41 +1222,54 @@ def import_monobank_account(
 
         if not transaction_id:
             logger.warning(
-                "%s: пропущено операцію без ID",
-                sheet_name,
+                "%s transaction without ID skipped",
+                integration_name,
             )
+
             continue
 
         if transaction_id in existing_ids:
             continue
 
-        transaction_timestamp = int(
+        timestamp = int(
             transaction.get("time", 0) or 0
         )
 
-        transaction_date = datetime.fromtimestamp(
-            transaction_timestamp,
+        transaction_datetime = datetime.fromtimestamp(
+            timestamp,
             tz=timezone.utc,
         ).astimezone(KYIV_TZ)
 
-        amount = parse_decimal(
-            transaction.get("amount", 0)
-        ) / 100
-
-        balance = parse_decimal(
-            transaction.get("balance", 0)
-        ) / 100
-
-        currency_code = (
-            transaction.get("currencyCode")
-            if transaction.get("currencyCode") is not None
-            else transaction.get("currency", "")
+        amount = (
+            parse_decimal(
+                transaction.get("amount", 0)
+            )
+            / 100
         )
+
+        balance = (
+            parse_decimal(
+                transaction.get("balance", 0)
+            )
+            / 100
+        )
+
+        currency_code = transaction.get(
+            "currencyCode"
+        )
+
+        if currency_code is None:
+            currency_code = transaction.get(
+                "currency",
+                "",
+            )
 
         row = [
             transaction_id,
             iban,
-            transaction_date.strftime("%d.%m.%Y"),
+            transaction_datetime.strftime(
+                "%d.%m.%Y"
+            ),
             clean_text(
                 transaction.get("description")
             ),
@@ -1027,8 +1277,12 @@ def import_monobank_account(
             "IN" if amount >= 0 else "OUT",
             clean_text(currency_code),
             balance,
-            clean_text(transaction.get("mcc")),
-            clean_text(transaction.get("comment")),
+            clean_text(
+                transaction.get("mcc")
+            ),
+            clean_text(
+                transaction.get("comment")
+            ),
             clean_text(
                 transaction.get("counterEdrpou")
             ),
@@ -1037,24 +1291,29 @@ def import_monobank_account(
             ),
         ]
 
-        rows_with_time.append(
-            (transaction_timestamp, row)
+        rows_with_timestamp.append(
+            (timestamp, row)
         )
 
         existing_ids.add(transaction_id)
 
-    rows_with_time.sort(key=lambda item: item[0])
+    rows_with_timestamp.sort(
+        key=lambda item: item[0]
+    )
 
     rows = [
         row
-        for _, row in rows_with_time
+        for _, row in rows_with_timestamp
     ]
 
-    append_rows_batch(worksheet, rows)
+    append_rows_batch(
+        worksheet,
+        rows,
+    )
 
     logger.info(
         "✓ %s: added %s row(s)",
-        sheet_name,
+        integration_name,
         len(rows),
     )
 
@@ -1102,50 +1361,49 @@ def ensure_novapay_config_sheet() -> gspread.Worksheet:
 
     current_header = values[0]
 
-    if len(current_header) < 3 or current_header[:3] != expected_header:
-        legacy_refresh = ""
-        legacy_certificate = ""
+    if current_header[:3] == expected_header:
+        return worksheet
 
-        for row in values:
-            if len(row) < 2:
-                continue
+    legacy_refresh_token = ""
+    legacy_certificate = ""
 
-            key = clean_text(row[0]).lower()
-            value = clean_text(row[1])
+    for row in values:
+        if len(row) < 2:
+            continue
 
-            if key == "refresh_token":
-                legacy_refresh = value
-            elif key == "public_certificate":
-                legacy_certificate = value
+        key = clean_text(row[0]).lower()
+        value = clean_text(row[1])
 
-        account_1_refresh = (
-            legacy_refresh
-            or NOVAPAY_REFRESH_TOKEN
-        )
+        if key == "refresh_token":
+            legacy_refresh_token = value
 
-        account_1_certificate = (
-            legacy_certificate
-            or NOVAPAY_PUBLIC_CERTIFICATE
-        )
+        elif key == "public_certificate":
+            legacy_certificate = value
 
-        worksheet.clear()
+    worksheet.clear()
 
-        worksheet.update(
-            range_name="A1:C3",
-            values=[
-                expected_header,
-                [
-                    "refresh_token",
-                    account_1_refresh,
-                    NOVAPAY_REFRESH_TOKEN_2,
-                ],
-                [
-                    "public_certificate",
-                    account_1_certificate,
-                    NOVAPAY_PUBLIC_CERTIFICATE_2,
-                ],
+    worksheet.update(
+        range_name="A1:C3",
+        values=[
+            expected_header,
+            [
+                "refresh_token",
+                (
+                    legacy_refresh_token
+                    or NOVAPAY_REFRESH_TOKEN
+                ),
+                NOVAPAY_REFRESH_TOKEN_2,
             ],
-        )
+            [
+                "public_certificate",
+                (
+                    legacy_certificate
+                    or NOVAPAY_PUBLIC_CERTIFICATE
+                ),
+                NOVAPAY_PUBLIC_CERTIFICATE_2,
+            ],
+        ],
+    )
 
     return worksheet
 
@@ -1155,36 +1413,78 @@ def read_novapay_credentials(
 ) -> tuple[str, str]:
     worksheet = ensure_novapay_config_sheet()
 
-    column_number = int(account["config_column"])
-
-    refresh_token = clean_text(
-        worksheet.cell(2, column_number).value
+    column_number = int(
+        account["config_column"]
     )
 
-    certificate = clean_text(
-        worksheet.cell(3, column_number).value
+    sheet_refresh_token = clean_text(
+        worksheet.cell(
+            2,
+            column_number,
+        ).value
+    )
+
+    sheet_certificate = clean_text(
+        worksheet.cell(
+            3,
+            column_number,
+        ).value
+    )
+
+    initial_refresh_token = clean_text(
+        account.get("initial_refresh_token")
+    )
+
+    initial_certificate = clean_text(
+        account.get("initial_certificate")
+    )
+
+    if sheet_refresh_token:
+        refresh_token = sheet_refresh_token
+
+        refresh_source = (
+            f"{NOVAPAY_CONFIG_SHEET}!"
+            f"{gspread.utils.rowcol_to_a1(2, column_number)}"
+        )
+
+    else:
+        refresh_token = initial_refresh_token
+        refresh_source = "GitHub Secret"
+
+    if sheet_certificate:
+        certificate = sheet_certificate
+
+        certificate_source = (
+            f"{NOVAPAY_CONFIG_SHEET}!"
+            f"{gspread.utils.rowcol_to_a1(3, column_number)}"
+        )
+
+    else:
+        certificate = initial_certificate
+        certificate_source = "GitHub Secret"
+
+    logger.info(
+        "  %s: Refresh Token source: %s",
+        account["integration"],
+        refresh_source,
+    )
+
+    logger.info(
+        "  %s: Certificate source: %s",
+        account["integration"],
+        certificate_source,
     )
 
     if not refresh_token:
-        refresh_token = clean_text(
-            account.get("initial_refresh_token")
-        )
-
-    if not certificate:
-        certificate = clean_text(
-            account.get("initial_certificate")
-        )
-
-    if not refresh_token:
         raise RuntimeError(
-            f"{account['name']}: відсутній Refresh Token "
-            f"у {NOVAPAY_CONFIG_SHEET}"
+            f"{account['integration']}: "
+            "Refresh Token is missing"
         )
 
     if not certificate:
         raise RuntimeError(
-            f"{account['name']}: відсутній Public Certificate "
-            f"у {NOVAPAY_CONFIG_SHEET}"
+            f"{account['integration']}: "
+            "Public Certificate is missing"
         )
 
     return refresh_token, certificate
@@ -1197,23 +1497,24 @@ def save_novapay_credentials(
 ) -> None:
     worksheet = ensure_novapay_config_sheet()
 
-    column_number = int(account["config_column"])
-
-    worksheet.update_cell(
-        2,
-        column_number,
-        refresh_token,
+    column_number = int(
+        account["config_column"]
     )
 
-    worksheet.update_cell(
-        3,
-        column_number,
-        certificate,
+    worksheet.update(
+        range_name=(
+            f"{gspread.utils.rowcol_to_a1(2, column_number)}:"
+            f"{gspread.utils.rowcol_to_a1(3, column_number)}"
+        ),
+        values=[
+            [refresh_token],
+            [certificate],
+        ],
     )
 
     logger.info(
         "  ✓ %s: rotated NovaPay credentials saved",
-        account["name"],
+        account["integration"],
     )
 
 
@@ -1246,14 +1547,15 @@ def parse_soap_response(
 
     if not response_text.strip():
         raise RuntimeError(
-            f"NovaPay {method_name}: порожня відповідь"
+            f"NovaPay {method_name}: empty response"
         )
 
     try:
         root = ET.fromstring(response_text)
+
     except ET.ParseError as exc:
         raise RuntimeError(
-            f"NovaPay {method_name}: невалідний XML: "
+            f"NovaPay {method_name}: invalid XML: "
             f"{truncate_text(response_text)}"
         ) from exc
 
@@ -1265,7 +1567,7 @@ def parse_soap_response(
             break
 
     if fault is not None:
-        fault_string = (
+        fault_text = (
             find_xml_text(fault, "faultstring")
             or find_xml_text(fault, "Text")
             or xml_to_string(fault)
@@ -1273,7 +1575,7 @@ def parse_soap_response(
 
         raise RuntimeError(
             f"NovaPay {method_name} SOAP Fault: "
-            f"{truncate_text(fault_string)}"
+            f"{truncate_text(fault_text)}"
         )
 
     return root
@@ -1300,10 +1602,10 @@ def novapay_soap_call(
             "Content-Type": "text/xml; charset=utf-8",
             "SOAPAction": f'"{soap_action}"',
             "Accept": "text/xml",
-            "User-Agent": "payments-bot/1.0",
+            "User-Agent": "payments-bot/2.0",
         },
         data=envelope.encode("utf-8"),
-        return_soap_fault=True,
+        allow_soap_fault_500=True,
     )
 
     return parse_soap_response(
@@ -1316,7 +1618,10 @@ def novapay_check_result(
     root: ET.Element,
     method_name: str,
 ) -> None:
-    result = find_xml_text(root, "result")
+    result = find_xml_text(
+        root,
+        "result",
+    )
 
     if not result:
         return
@@ -1334,7 +1639,7 @@ def novapay_check_result(
         "title",
     )
 
-    details = " | ".join(
+    error_details = " | ".join(
         value
         for value in [
             error_status,
@@ -1343,23 +1648,25 @@ def novapay_check_result(
         if value
     )
 
-    if not details:
-        details = truncate_text(
+    if not error_details:
+        error_details = truncate_text(
             xml_to_string(root)
         )
 
     raise RuntimeError(
-        f"NovaPay {method_name}: {details}"
+        f"NovaPay {method_name}: {error_details}"
     )
 
 
 def novapay_authenticate(
     account: dict[str, Any],
 ) -> str:
-    login = clean_text(account["login"])
+    login = clean_text(
+        account["login"]
+    )
 
     require_value(
-        f"login for {account['name']}",
+        f"{account['integration']} login",
         login,
     )
 
@@ -1367,11 +1674,34 @@ def novapay_authenticate(
         read_novapay_credentials(account)
     )
 
-    request_ref = str(uuid.uuid4())
+    logger.info(
+        "  NovaPay credentials for %s:",
+        account["integration"],
+    )
+
+    logger.info(
+        "    login: %s",
+        safe_fingerprint(login),
+    )
+
+    logger.info(
+        "    refresh_token: %s",
+        safe_fingerprint(refresh_token),
+    )
+
+    logger.info(
+        "    certificate: %s",
+        safe_fingerprint(certificate),
+    )
+
+    logger.info(
+        "    config column: %s",
+        account["config_column"],
+    )
 
     request_body = f"""
 <tem:request>
-  <tem:request_ref>{html.escape(request_ref)}</tem:request_ref>
+  <tem:request_ref>{html.escape(str(uuid.uuid4()))}</tem:request_ref>
   <tem:refresh_token>{html.escape(refresh_token)}</tem:refresh_token>
   <tem:login>{html.escape(login)}</tem:login>
   <tem:public_certificate>{html.escape(certificate)}</tem:public_certificate>
@@ -1388,11 +1718,16 @@ def novapay_authenticate(
         "UserAuthenticationJWT",
     )
 
-    jwt = find_xml_text(root, "jwt")
+    jwt = find_xml_text(
+        root,
+        "jwt",
+    )
+
     new_refresh_token = find_xml_text(
         root,
         "refresh_token",
     )
+
     new_certificate = find_xml_text(
         root,
         "public_certificate",
@@ -1400,23 +1735,24 @@ def novapay_authenticate(
 
     if not jwt:
         raise RuntimeError(
-            f"{account['name']}: NovaPay не повернув JWT"
+            f"{account['integration']}: "
+            "NovaPay did not return JWT"
         )
 
     if not new_refresh_token:
         raise RuntimeError(
-            f"{account['name']}: NovaPay не повернув "
-            "новий Refresh Token"
+            f"{account['integration']}: "
+            "NovaPay did not return new Refresh Token"
         )
 
     if not new_certificate:
         raise RuntimeError(
-            f"{account['name']}: NovaPay не повернув "
-            "новий Public Certificate"
+            f"{account['integration']}: "
+            "NovaPay did not return new certificate"
         )
 
-    # Зберігаємо відразу після успішної ротації.
-    # Старий Refresh Token уже недійсний.
+    # Сохраняем сразу после успешной ротации.
+    # Старый Refresh Token уже недействителен.
     save_novapay_credentials(
         account,
         new_refresh_token,
@@ -1444,20 +1780,27 @@ def find_client_records(
         ):
             records.append(children)
 
-    unique: dict[str, dict[str, str]] = {}
+    unique_records: dict[
+        str,
+        dict[str, str],
+    ] = {}
 
     for record in records:
-        record_id = clean_text(record.get("id"))
+        record_id = clean_text(
+            record.get("id")
+        )
 
         if record_id:
-            unique[record_id] = record
+            unique_records[record_id] = record
 
-    return list(unique.values())
+    return list(
+        unique_records.values()
+    )
 
 
 def novapay_get_client_id(
     jwt: str,
-    account_name: str,
+    integration_name: str,
 ) -> str:
     request_body = f"""
 <tem:request>
@@ -1480,15 +1823,14 @@ def novapay_get_client_id(
 
     if not clients:
         raise RuntimeError(
-            f"{account_name}: NovaPay не повернув "
-            "доступних підприємств"
+            f"{integration_name}: "
+            "NovaPay returned no clients"
         )
 
     if len(clients) > 1:
         logger.warning(
-            "%s: доступно %s підприємств. "
-            "Використовую перше: %s",
-            account_name,
+            "%s: found %s clients. Using first: %s",
+            integration_name,
             len(clients),
             clients[0],
         )
@@ -1499,7 +1841,8 @@ def novapay_get_client_id(
 
     if not client_id:
         raise RuntimeError(
-            f"{account_name}: у підприємства немає id"
+            f"{integration_name}: "
+            "NovaPay client has no id"
         )
 
     return client_id
@@ -1514,6 +1857,7 @@ def find_account_records(
         children = direct_children_map(element)
 
         account_id = children.get("id", "")
+
         iban = (
             children.get("IBAN", "")
             or children.get("iban", "")
@@ -1522,21 +1866,28 @@ def find_account_records(
         if account_id and iban:
             records.append(children)
 
-    unique: dict[str, dict[str, str]] = {}
+    unique_records: dict[
+        str,
+        dict[str, str],
+    ] = {}
 
     for record in records:
-        record_id = clean_text(record.get("id"))
+        record_id = clean_text(
+            record.get("id")
+        )
 
         if record_id:
-            unique[record_id] = record
+            unique_records[record_id] = record
 
-    return list(unique.values())
+    return list(
+        unique_records.values()
+    )
 
 
 def novapay_get_account_id(
     jwt: str,
     client_id: str,
-    account_name: str,
+    integration_name: str,
 ) -> str:
     request_body = f"""
 <tem:request>
@@ -1560,7 +1911,8 @@ def novapay_get_account_id(
 
     if not accounts:
         raise RuntimeError(
-            f"{account_name}: NovaPay не повернув рахунків"
+            f"{integration_name}: "
+            "NovaPay returned no accounts"
         )
 
     active_accounts = []
@@ -1570,7 +1922,10 @@ def novapay_get_account_id(
             item.get("statuscode")
         ).lower()
 
-        if not status_code or status_code == "active":
+        if (
+            not status_code
+            or status_code == "active"
+        ):
             active_accounts.append(item)
 
     selected_accounts = (
@@ -1581,9 +1936,8 @@ def novapay_get_account_id(
 
     if len(selected_accounts) > 1:
         logger.warning(
-            "%s: знайдено %s рахунків. "
-            "Використовую перший: %s",
-            account_name,
+            "%s: found %s accounts. Using first: %s",
+            integration_name,
             len(selected_accounts),
             selected_accounts[0],
         )
@@ -1594,7 +1948,8 @@ def novapay_get_account_id(
 
     if not account_id:
         raise RuntimeError(
-            f"{account_name}: рахунок NovaPay не має id"
+            f"{integration_name}: "
+            "NovaPay account has no id"
         )
 
     return account_id
@@ -1603,9 +1958,9 @@ def novapay_get_account_id(
 def novapay_get_payment_elements(
     jwt: str,
     account_id: str,
-    account_name: str,
+    integration_name: str,
 ) -> list[ET.Element]:
-    start, end = date_range_30_days()
+    start, end = get_import_range()
 
     request_body = f"""
 <tem:request>
@@ -1623,17 +1978,27 @@ def novapay_get_payment_elements(
         request_body,
     )
 
-    result = find_xml_text(root, "result")
+    result = find_xml_text(
+        root,
+        "result",
+    )
 
     if result and result.lower() != "ok":
-        error_title = find_xml_text(root, "title")
-        error_status = find_xml_text(root, "status")
+        error_status = find_xml_text(
+            root,
+            "status",
+        )
+
+        error_title = find_xml_text(
+            root,
+            "title",
+        )
 
         combined_error = (
             f"{error_status} {error_title}"
         ).lower()
 
-        empty_indicators = [
+        no_documents_indicators = [
             "no documents",
             "not found",
             "відсутні платежі",
@@ -1642,7 +2007,7 @@ def novapay_get_payment_elements(
 
         if any(
             indicator in combined_error
-            for indicator in empty_indicators
+            for indicator in no_documents_indicators
         ):
             return []
 
@@ -1663,10 +2028,11 @@ def novapay_get_payment_elements(
         payments_root = ET.fromstring(
             payments_xml
         )
+
     except ET.ParseError as exc:
         raise RuntimeError(
-            f"{account_name}: NovaPay payments містить "
-            "невалідний XML: "
+            f"{integration_name}: "
+            "NovaPay payments contains invalid XML: "
             f"{truncate_text(payments_xml)}"
         ) from exc
 
@@ -1681,9 +2047,18 @@ def novapay_payment_date(
     document: ET.Element,
 ) -> str:
     date_value = (
-        find_direct_child_text(document, "DayDate")
-        or find_direct_child_text(document, "OrgDate")
-        or find_direct_child_text(document, "PayDate")
+        find_direct_child_text(
+            document,
+            "DayDate",
+        )
+        or find_direct_child_text(
+            document,
+            "OrgDate",
+        )
+        or find_direct_child_text(
+            document,
+            "PayDate",
+        )
     )
 
     return format_date(date_value)
@@ -1693,28 +2068,35 @@ def novapay_payment_sort_key(
     document: ET.Element,
 ) -> datetime:
     date_value = (
-        find_direct_child_text(document, "DayDate")
-        or find_direct_child_text(document, "OrgDate")
-        or find_direct_child_text(document, "PayDate")
+        find_direct_child_text(
+            document,
+            "DayDate",
+        )
+        or find_direct_child_text(
+            document,
+            "OrgDate",
+        )
+        or find_direct_child_text(
+            document,
+            "PayDate",
+        )
     )
 
-    return parse_date_value(date_value) or datetime.min
+    return (
+        parse_date_value(date_value)
+        or datetime.min
+    )
 
 
 def import_novapay_account(
     account: dict[str, Any],
 ) -> int:
+    integration_name = account["integration"]
+
     logger.info("")
     logger.info(
         "💳 Processing NovaPay: %s",
-        account["name"],
-    )
-
-    login = clean_text(account.get("login"))
-
-    require_value(
-        f"login for {account['name']}",
-        login,
+        integration_name,
     )
 
     worksheet = get_or_create_worksheet(
@@ -1725,7 +2107,7 @@ def import_novapay_account(
 
     ensure_novapay_header(worksheet)
 
-    # Для NovaPay унікальний номер знаходиться в колонці B.
+    # NovaPay duplicate check is by column B.
     existing_codes = load_existing_values(
         worksheet,
         2,
@@ -1735,19 +2117,19 @@ def import_novapay_account(
 
     client_id = novapay_get_client_id(
         jwt,
-        account["name"],
+        integration_name,
     )
 
     account_id = novapay_get_account_id(
         jwt,
         client_id,
-        account["name"],
+        integration_name,
     )
 
     documents = novapay_get_payment_elements(
         jwt,
         account_id,
-        account["name"],
+        integration_name,
     )
 
     rows: list[list[Any]] = []
@@ -1763,13 +2145,18 @@ def import_novapay_account(
 
         if not code:
             logger.warning(
-                "%s: пропущено платіж без Code",
-                account["name"],
+                "%s payment without Code skipped",
+                integration_name,
             )
+
             continue
 
         if code in existing_codes:
             continue
+
+        payment_date = novapay_payment_date(
+            document
+        )
 
         amount = parse_decimal(
             document.attrib.get("Amount", 0)
@@ -1785,10 +2172,6 @@ def import_novapay_account(
             "Purpose",
         )
 
-        payment_date = novapay_payment_date(
-            document
-        )
-
         rows.append([
             payment_date,
             code,
@@ -1799,11 +2182,14 @@ def import_novapay_account(
 
         existing_codes.add(code)
 
-    append_rows_batch(worksheet, rows)
+    append_rows_batch(
+        worksheet,
+        rows,
+    )
 
     logger.info(
         "✓ %s: added %s row(s)",
-        account["name"],
+        integration_name,
         len(rows),
     )
 
@@ -1815,7 +2201,9 @@ def import_novapay_account(
 # =============================================================================
 
 def log_initialization() -> None:
-    logger.info("📋 ENVIRONMENT VARIABLES CHECK:")
+    logger.info(
+        "📋 ENVIRONMENT VARIABLES CHECK:"
+    )
 
     variables = [
         ("MONO_TOKEN_1", MONO_TOKEN_1),
@@ -1831,7 +2219,10 @@ def log_initialization() -> None:
             "NOVAPAY_REFRESH_TOKEN",
             NOVAPAY_REFRESH_TOKEN,
         ),
-        ("NOVAPAY_LOGIN_2", NOVAPAY_LOGIN_2),
+        (
+            "NOVAPAY_LOGIN_2",
+            NOVAPAY_LOGIN_2,
+        ),
         (
             "NOVAPAY_PUBLIC_CERTIFICATE_2",
             NOVAPAY_PUBLIC_CERTIFICATE_2,
@@ -1851,18 +2242,20 @@ def log_initialization() -> None:
 
     for name, value in variables:
         logger.info(
-            "  %-32s %s",
+            "  %-34s %s",
             f"{name}:",
             secret_status(value),
         )
 
     logger.info("")
-    logger.info("📦 ACCOUNTS CONFIGURATION:")
+    logger.info(
+        "📦 ACCOUNTS CONFIGURATION:"
+    )
 
     for account in MONO_ACCOUNTS:
         logger.info(
             "  %s: token=%s, iban=%s",
-            account["sheet"],
+            account["integration"],
             bool(account["token"]),
             bool(account["iban"]),
         )
@@ -1870,11 +2263,68 @@ def log_initialization() -> None:
     for account in NOVAPAY_ACCOUNTS:
         logger.info(
             "  %s: login=%s, initial_token=%s, "
-            "initial_certificate=%s",
-            account["sheet"],
+            "initial_certificate=%s, config_column=%s",
+            account["integration"],
             bool(account["login"]),
             bool(account["initial_refresh_token"]),
             bool(account["initial_certificate"]),
+            account["config_column"],
+        )
+
+
+# =============================================================================
+# TASK RUNNER
+# =============================================================================
+
+def run_integration(
+    integration_name: str,
+    task_function,
+    results: dict[str, int],
+    errors: list[str],
+) -> None:
+    if integration_succeeded_today(
+        integration_name
+    ):
+        logger.info("")
+        logger.info(
+            "⏭ %s already completed successfully today. Skipping.",
+            integration_name,
+        )
+
+        results[integration_name] = 0
+
+        return
+
+    try:
+        added_rows = task_function()
+
+        results[integration_name] = added_rows
+
+        save_integration_state(
+            integration_name=integration_name,
+            status="OK",
+            added_rows=added_rows,
+            error="",
+        )
+
+    except Exception as exc:
+        error_message = (
+            f"{integration_name}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        errors.append(error_message)
+
+        save_integration_state(
+            integration_name=integration_name,
+            status="ERROR",
+            added_rows=0,
+            error=error_message,
+        )
+
+        logger.exception(
+            "✗ %s failed",
+            integration_name,
         )
 
 
@@ -1889,82 +2339,85 @@ def main() -> None:
 
     log_initialization()
 
-    # Гарантуємо підключення до таблиці до перевірки логів.
+    # Проверяем подключение до запуска банков.
     get_spreadsheet()
 
-    if already_success_today():
+    if all_integrations_succeeded_today():
+        logger.info("")
         logger.info(
-            "✓ Сьогодні вже був повністю успішний запуск. "
-            "Повторний імпорт не потрібен."
+            "✓ All five integrations have already "
+            "completed successfully today."
         )
+
+        logger.info(
+            "No bank API requests will be sent."
+        )
+
         return
 
     results: dict[str, int] = {
-        PRIVAT_SHEET: 0,
-        MONO_SHEET_1: 0,
-        MONO_SHEET_2: 0,
-        NOVAPAY_SHEET_1: 0,
-        NOVAPAY_SHEET_2: 0,
+        "Privat": 0,
+        "Monobank": 0,
+        "MonoBank Сергій": 0,
+        "NovaPay Анастасія": 0,
+        "NovaPay Сергій": 0,
     }
 
     errors: list[str] = []
 
-    tasks = [
-        (
-            PRIVAT_SHEET,
-            import_privatbank,
-        ),
-        (
-            MONO_SHEET_1,
-            lambda: import_monobank_account(
-                MONO_ACCOUNTS[0]
-            ),
-        ),
-        (
-            MONO_SHEET_2,
-            lambda: import_monobank_account(
-                MONO_ACCOUNTS[1]
-            ),
-        ),
-        (
-            NOVAPAY_SHEET_1,
-            lambda: import_novapay_account(
-                NOVAPAY_ACCOUNTS[0]
-            ),
-        ),
-        (
-            NOVAPAY_SHEET_2,
-            lambda: import_novapay_account(
-                NOVAPAY_ACCOUNTS[1]
-            ),
-        ),
-    ]
+    run_integration(
+        integration_name="Privat",
+        task_function=import_privatbank,
+        results=results,
+        errors=errors,
+    )
 
-    for task_name, task_function in tasks:
-        try:
-            results[task_name] = task_function()
-        except Exception as exc:
-            error_message = (
-                f"{task_name}: {type(exc).__name__}: {exc}"
-            )
+    run_integration(
+        integration_name="Monobank",
+        task_function=lambda: import_monobank_account(
+            MONO_ACCOUNTS[0]
+        ),
+        results=results,
+        errors=errors,
+    )
 
-            errors.append(error_message)
+    run_integration(
+        integration_name="MonoBank Сергій",
+        task_function=lambda: import_monobank_account(
+            MONO_ACCOUNTS[1]
+        ),
+        results=results,
+        errors=errors,
+    )
 
-            logger.exception(
-                "✗ %s failed",
-                task_name,
-            )
+    run_integration(
+        integration_name="NovaPay Анастасія",
+        task_function=lambda: import_novapay_account(
+            NOVAPAY_ACCOUNTS[0]
+        ),
+        results=results,
+        errors=errors,
+    )
+
+    run_integration(
+        integration_name="NovaPay Сергій",
+        task_function=lambda: import_novapay_account(
+            NOVAPAY_ACCOUNTS[1]
+        ),
+        results=results,
+        errors=errors,
+    )
 
     logger.info("")
     logger.info("=" * 70)
     logger.info("📊 IMPORT SUMMARY")
     logger.info("=" * 70)
 
-    for sheet_name, added_count in results.items():
+    for integration_name, added_rows in results.items():
         logger.info(
             "  %-25s %s row(s)",
-            f"{sheet_name}:",
-            added_count,
+            f"{integration_name}:",
+            added_rows,
         )
 
     logger.info(
@@ -1974,11 +2427,14 @@ def main() -> None:
     )
 
     if errors:
-        status = "ERROR | " + " || ".join(errors)
+        status = (
+            "ERROR | "
+            + " || ".join(errors)
+        )
 
         write_execution_log(
             results,
-            truncate_text(status, 45000),
+            status,
         )
 
         logger.error("")
@@ -1988,12 +2444,13 @@ def main() -> None:
         )
 
         for error in errors:
-            logger.error("  - %s", error)
+            logger.error(
+                "  - %s",
+                error,
+            )
 
-        # Критично: workflow має бути червоним.
-        # Тоді наступний погодинний запуск повторить імпорт.
         raise RuntimeError(
-            f"Не відпрацювали {len(errors)} інтеграції: "
+            f"Failed integrations: {len(errors)}. "
             + " | ".join(errors)
         )
 
@@ -2003,7 +2460,10 @@ def main() -> None:
     )
 
     logger.info("")
-    logger.info("✓ IMPORT COMPLETED SUCCESSFULLY")
+    logger.info(
+        "✓ IMPORT COMPLETED SUCCESSFULLY"
+    )
+
     logger.info("=" * 70)
 
 
