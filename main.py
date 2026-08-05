@@ -1,4 +1,4 @@
-import hashlib
+import hashlib   
 import html
 import json
 import logging
@@ -664,19 +664,28 @@ def ensure_mono_header(
 def ensure_novapay_header(
     worksheet: gspread.Worksheet,
 ) -> None:
-    values = worksheet.get_all_values()
-
-    if values:
-        return
-
-    worksheet.append_row([
+    expected_header = [
         "Дата платежу",
         "Номер транзакції",
         "Сума",
         "Тип",
         "Призначення платежу",
-    ])
+        "Контрагент",
+    ]
 
+    values = worksheet.get_all_values()
+
+    if not values:
+        worksheet.append_row(expected_header)
+        return
+
+    current_header = values[0]
+
+    if current_header[:6] != expected_header:
+        worksheet.update(
+            range_name="A1:F1",
+            values=[expected_header],
+        )
 
 def ensure_logs_header(
     worksheet: gspread.Worksheet,
@@ -2086,7 +2095,35 @@ def novapay_payment_sort_key(
         parse_date_value(date_value)
         or datetime.min
     )
+def novapay_counterparty_name(
+    document: ET.Element,
+    payment_type: str,
+) -> str:
+    debit_name = find_direct_child_text(
+        document,
+        "DebitName",
+    )
 
+    credit_name = find_direct_child_text(
+        document,
+        "CreditName",
+    )
+
+    normalized_type = clean_text(
+        payment_type
+    ).lower()
+
+    # Debit — деньги списаны с нашего счёта.
+    # Контрагентом является получатель.
+    if normalized_type == "debit":
+        return credit_name or debit_name
+
+    # Credit — деньги поступили на наш счёт.
+    # Контрагентом является плательщик.
+    if normalized_type == "credit":
+        return debit_name or credit_name
+
+    return debit_name or credit_name
 
 def import_novapay_account(
     account: dict[str, Any],
@@ -2172,12 +2209,18 @@ def import_novapay_account(
             "Purpose",
         )
 
+        counterparty_name = novapay_counterparty_name(
+            document,
+            payment_type,
+        )
+
         rows.append([
             payment_date,
             code,
             amount,
             payment_type,
             purpose,
+            counterparty_name,
         ])
 
         existing_codes.add(code)
