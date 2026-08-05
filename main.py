@@ -367,11 +367,51 @@ def request_with_retry(
             response.raise_for_status()
             return response
 
-        except requests.RequestException as exc:
+        except requests.HTTPError as exc:
+            status_code = (
+                exc.response.status_code
+                if exc.response is not None
+                else None
+            )
+        
+            if status_code in (400, 401, 403, 404):
+                raise RuntimeError(
+                    f"HTTP {status_code}: "
+                    f"{truncate_text(exc.response.text if exc.response is not None else str(exc))}"
+                ) from exc
+        
             last_error = exc
-
+        
             if attempt >= retries:
                 break
+        
+            logger.warning(
+                "Помилка HTTP-запиту. Повтор %s/%s через %s секунд: %s",
+                attempt,
+                retries,
+                delay,
+                exc,
+            )
+        
+            time.sleep(delay)
+            delay = min(delay * 2, 120)
+        
+        except requests.RequestException as exc:
+            last_error = exc
+        
+            if attempt >= retries:
+                break
+        
+            logger.warning(
+                "Помилка мережевого запиту. Повтор %s/%s через %s секунд: %s",
+                attempt,
+                retries,
+                delay,
+                exc,
+            )
+        
+            time.sleep(delay)
+            delay = min(delay * 2, 120)
 
             logger.warning(
                 "Помилка HTTP-запиту. Повтор %s/%s "
