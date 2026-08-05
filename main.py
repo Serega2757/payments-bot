@@ -267,8 +267,13 @@ def get_novapay_jwt(login, certificate, refresh_token):
         }
 
         logger.debug(f"  Getting JWT for NovaPay account: {login}")
+
+        # Try the correct endpoint with /v1/
+        url = "https://api.novapay.ua/v1/auth/jwt"
+        logger.debug(f"  Trying endpoint: {url}")
+
         resp = requests.post(
-            "https://business.novapay.ua/api/auth/jwt",
+            url,
             json=payload,
             headers=headers,
             timeout=10
@@ -279,6 +284,9 @@ def get_novapay_jwt(login, certificate, refresh_token):
         return jwt
     except Exception as e:
         logger.error(f"  ✗ Error getting NovaPay JWT: {e}")
+        logger.error(f"  Response status: {resp.status_code if 'resp' in locals() else 'N/A'}")
+        if 'resp' in locals():
+            logger.error(f"  Response body: {resp.text[:200]}")
         return None
 
 def get_novapay_statements(jwt_token):
