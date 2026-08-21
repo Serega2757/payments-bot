@@ -2325,6 +2325,10 @@ def run_integration(
     results: dict[str, int],
     errors: list[str],
 ) -> None:
+    """
+    Запустить интеграцию с обработкой ошибок.
+    Ошибка в одной интеграции НЕ блокирует другие.
+    """
     if integration_succeeded_today(
         integration_name
     ):
@@ -2358,6 +2362,8 @@ def run_integration(
 
         errors.append(error_message)
 
+        results[integration_name] = 0  # Важно: установить 0 для ошибочных интеграций
+
         save_integration_state(
             integration_name=integration_name,
             status="ERROR",
@@ -2369,6 +2375,8 @@ def run_integration(
             "✗ %s failed",
             integration_name,
         )
+
+        # ВАЖНО: НЕ прерываем программу - продолжаем обработку других интеграций
 
 
 # =============================================================================
@@ -2456,33 +2464,25 @@ def main() -> None:
     logger.info("📊 IMPORT SUMMARY")
     logger.info("=" * 70)
 
+    total_rows = 0
     for integration_name, added_rows in results.items():
         logger.info(
             "  %-25s %s row(s)",
             f"{integration_name}:",
             added_rows,
         )
+        total_rows += added_rows
 
     logger.info(
         "  %-25s %s row(s)",
         "TOTAL:",
-        sum(results.values()),
+        total_rows,
     )
 
     if errors:
-        status = (
-            "ERROR | "
-            + " || ".join(errors)
-        )
-
-        write_execution_log(
-            results,
-            status,
-        )
-
         logger.error("")
         logger.error(
-            "✗ IMPORT FINISHED WITH %s ERROR(S)",
+            "⚠ IMPORT FINISHED WITH %s ERROR(S):",
             len(errors),
         )
 
@@ -2492,10 +2492,57 @@ def main() -> None:
                 error,
             )
 
-        raise RuntimeError(
-            f"Failed integrations: {len(errors)}. "
-            + " | ".join(errors)
-        )
+        # Если были ошибки но кое-что импортировалось - это не критично
+        if total_rows > 0:
+            status = (
+                "PARTIAL | "
+                + " || ".join(errors)
+            )
+
+            write_execution_log(
+                results,
+                status,
+            )
+
+            logger.info("")
+            logger.info(
+                "✓ IMPORT COMPLETED WITH PARTIAL SUCCESS"
+            )
+
+            logger.info(
+                "  ✓ Imported %s rows despite %s error(s)",
+                total_rows,
+                len(errors),
+            )
+
+            logger.info("=" * 70)
+
+            # Возвращаемся успешно, потому что часть данных импортировалась
+            return
+
+        # Если не импортировалось НИЧЕГО и были ошибки - это ошибка
+        else:
+            status = (
+                "ERROR | "
+                + " || ".join(errors)
+            )
+
+            write_execution_log(
+                results,
+                status,
+            )
+
+            logger.error("")
+            logger.error(
+                "✗ IMPORT COMPLETED WITH NO SUCCESSFUL INTEGRATIONS"
+            )
+
+            logger.info("=" * 70)
+
+            raise RuntimeError(
+                f"Failed integrations: {len(errors)}. "
+                + " | ".join(errors)
+            )
 
     write_execution_log(
         results,
