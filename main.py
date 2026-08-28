@@ -69,6 +69,7 @@ MONO_SHEET_2 = "MonoBank Сергій"
 
 NOVAPAY_SHEET_1 = "NovaPay Анастасія"
 NOVAPAY_SHEET_2 = "NovaPay Сергій"
+NOVAPAY_SHEET_3 = "NovaPay Олександра"
 
 NOVAPAY_CONFIG_SHEET = "NovaPay_Config"
 
@@ -130,6 +131,21 @@ NOVAPAY_PUBLIC_CERTIFICATE_2 = os.getenv(
     "",
 ).strip()
 
+NOVAPAY_LOGIN_3 = os.getenv(
+    "NOVAPAY_LOGIN_3",
+    "",
+).strip()
+
+NOVAPAY_REFRESH_TOKEN_3 = os.getenv(
+    "NOVAPAY_REFRESH_TOKEN_3",
+    "",
+).strip()
+
+NOVAPAY_PUBLIC_CERTIFICATE_3 = os.getenv(
+    "NOVAPAY_PUBLIC_CERTIFICATE_3",
+    "",
+).strip()
+
 
 # =============================================================================
 # ACCOUNT CONFIGURATION
@@ -167,6 +183,14 @@ NOVAPAY_ACCOUNTS = [
         "initial_refresh_token": NOVAPAY_REFRESH_TOKEN_2,
         "initial_certificate": NOVAPAY_PUBLIC_CERTIFICATE_2,
     },
+    {
+        "integration": "NovaPay Олександра",
+        "sheet": NOVAPAY_SHEET_3,
+        "login": NOVAPAY_LOGIN_3,
+        "config_column": 4,
+        "initial_refresh_token": NOVAPAY_REFRESH_TOKEN_3,
+        "initial_certificate": NOVAPAY_PUBLIC_CERTIFICATE_3,
+    },
 ]
 
 ALL_INTEGRATIONS = [
@@ -175,6 +199,7 @@ ALL_INTEGRATIONS = [
     "MonoBank Сергій",
     "NovaPay Анастасія",
     "NovaPay Сергій",
+    "NovaPay Олександра",
 ]
 
 
@@ -2412,6 +2437,7 @@ def main() -> None:
         "MonoBank Сергій": 0,
         "NovaPay Анастасія": 0,
         "NovaPay Сергій": 0,
+        "NovaPay Олександра": 0,
     }
 
     errors: list[str] = []
@@ -2454,6 +2480,15 @@ def main() -> None:
         integration_name="NovaPay Сергій",
         task_function=lambda: import_novapay_account(
             NOVAPAY_ACCOUNTS[1]
+        ),
+        results=results,
+        errors=errors,
+    )
+
+    run_integration(
+        integration_name="NovaPay Олександра",
+        task_function=lambda: import_novapay_account(
+            NOVAPAY_ACCOUNTS[2]
         ),
         results=results,
         errors=errors,
