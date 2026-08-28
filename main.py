@@ -2289,6 +2289,10 @@ def log_initialization() -> None:
             "NOVAPAY_REFRESH_TOKEN_2",
             NOVAPAY_REFRESH_TOKEN_2,
         ),
+        (
+            "NOVAPAY_LOGIN_3",
+            NOVAPAY_LOGIN_3,
+        ),
         ("PB_ID", PB_ID),
         ("PB_TOKEN", PB_TOKEN),
         ("PB_ACC", PB_ACC),
