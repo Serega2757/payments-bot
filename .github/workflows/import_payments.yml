@@ -37,4 +37,7 @@ jobs:
           NOVAPAY_LOGIN_2: ${{ secrets.NOVAPAY_LOGIN_2 }}
           NOVAPAY_PUBLIC_CERTIFICATE_2: ${{ secrets.NOVAPAY_PUBLIC_CERTIFICATE_2 }}
           NOVAPAY_REFRESH_TOKEN_2: ${{ secrets.NOVAPAY_REFRESH_TOKEN_2 }}
+          NOVAPAY_LOGIN_3: ${{ secrets.NOVAPAY_LOGIN_3 }}
+          NOVAPAY_PUBLIC_CERTIFICATE_3: ${{ secrets.NOVAPAY_PUBLIC_CERTIFICATE_3 }}
+          NOVAPAY_REFRESH_TOKEN_3: ${{ secrets.NOVAPAY_REFRESH_TOKEN_3 }}
         run: python main.py
