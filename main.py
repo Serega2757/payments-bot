@@ -136,16 +136,6 @@ NOVAPAY_LOGIN_3 = os.getenv(
     "",
 ).strip()
 
-NOVAPAY_REFRESH_TOKEN_3 = os.getenv(
-    "NOVAPAY_REFRESH_TOKEN_3",
-    "",
-).strip()
-
-NOVAPAY_PUBLIC_CERTIFICATE_3 = os.getenv(
-    "NOVAPAY_PUBLIC_CERTIFICATE_3",
-    "",
-).strip()
-
 
 # =============================================================================
 # ACCOUNT CONFIGURATION
@@ -188,8 +178,8 @@ NOVAPAY_ACCOUNTS = [
         "sheet": NOVAPAY_SHEET_3,
         "login": NOVAPAY_LOGIN_3,
         "config_column": 4,
-        "initial_refresh_token": NOVAPAY_REFRESH_TOKEN_3,
-        "initial_certificate": NOVAPAY_PUBLIC_CERTIFICATE_3,
+        "initial_refresh_token": "",
+        "initial_certificate": "",
     },
 ]
 
