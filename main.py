@@ -69,7 +69,6 @@ MONO_SHEET_2 = "MonoBank Сергій"
 
 NOVAPAY_SHEET_1 = "NovaPay Анастасія"
 NOVAPAY_SHEET_2 = "NovaPay Сергій"
-NOVAPAY_SHEET_3 = "NovaPay Олександра"
 
 NOVAPAY_CONFIG_SHEET = "NovaPay_Config"
 
@@ -131,11 +130,6 @@ NOVAPAY_PUBLIC_CERTIFICATE_2 = os.getenv(
     "",
 ).strip()
 
-NOVAPAY_LOGIN_3 = os.getenv(
-    "NOVAPAY_LOGIN_3",
-    "",
-).strip()
-
 
 # =============================================================================
 # ACCOUNT CONFIGURATION
@@ -173,14 +167,6 @@ NOVAPAY_ACCOUNTS = [
         "initial_refresh_token": NOVAPAY_REFRESH_TOKEN_2,
         "initial_certificate": NOVAPAY_PUBLIC_CERTIFICATE_2,
     },
-    {
-        "integration": "NovaPay Олександра",
-        "sheet": NOVAPAY_SHEET_3,
-        "login": NOVAPAY_LOGIN_3,
-        "config_column": 4,
-        "initial_refresh_token": "",
-        "initial_certificate": "",
-    },
 ]
 
 ALL_INTEGRATIONS = [
@@ -189,7 +175,6 @@ ALL_INTEGRATIONS = [
     "MonoBank Сергій",
     "NovaPay Анастасія",
     "NovaPay Сергій",
-    "NovaPay Олександра",
 ]
 
 
@@ -2289,10 +2274,6 @@ def log_initialization() -> None:
             "NOVAPAY_REFRESH_TOKEN_2",
             NOVAPAY_REFRESH_TOKEN_2,
         ),
-        (
-            "NOVAPAY_LOGIN_3",
-            NOVAPAY_LOGIN_3,
-        ),
         ("PB_ID", PB_ID),
         ("PB_TOKEN", PB_TOKEN),
         ("PB_ACC", PB_ACC),
@@ -2431,7 +2412,6 @@ def main() -> None:
         "MonoBank Сергій": 0,
         "NovaPay Анастасія": 0,
         "NovaPay Сергій": 0,
-        "NovaPay Олександра": 0,
     }
 
     errors: list[str] = []
@@ -2474,15 +2454,6 @@ def main() -> None:
         integration_name="NovaPay Сергій",
         task_function=lambda: import_novapay_account(
             NOVAPAY_ACCOUNTS[1]
-        ),
-        results=results,
-        errors=errors,
-    )
-
-    run_integration(
-        integration_name="NovaPay Олександра",
-        task_function=lambda: import_novapay_account(
-            NOVAPAY_ACCOUNTS[2]
         ),
         results=results,
         errors=errors,
