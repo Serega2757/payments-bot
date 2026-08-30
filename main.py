@@ -22,6 +22,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 # =============================================================================
+# WORKSHEET CACHING - PREVENTS [429] API QUOTA ERRORS
+# =============================================================================
+_WORKSHEET_CACHE = {}
+
+def clear_worksheet_cache():
+    """Clear the worksheet cache (call at start of main run)"""
+    global _WORKSHEET_CACHE
+    _WORKSHEET_CACHE = {}
+
+def get_cached_worksheet_values(worksheet_key, fetch_func):
+    """
+    Get worksheet values with caching to avoid repeated API calls.
+
+    Args:
+        worksheet_key: Unique identifier for the worksheet (e.g., sheet name)
+        fetch_func: Function that fetches the values (e.g., worksheet.get_all_values)
+
+    Returns:
+        List of worksheet rows
+    """
+    global _WORKSHEET_CACHE
+
+    if worksheet_key not in _WORKSHEET_CACHE:
+        # First call - fetch from API and cache
+        _WORKSHEET_CACHE[worksheet_key] = fetch_func()
+
+    return _WORKSHEET_CACHE[worksheet_key]
+
+# =============================================================================
 # GENERAL CONFIGURATION
 # =============================================================================
 SPREADSHEET_ID = "1KujvD6_Z6r0474URqHbjlWZthEW_XDqHa1IwtZ0PsqY"
@@ -588,7 +617,7 @@ def ensure_state_header(
             values=[expected_header],
         )
 # =============================================================================
-# DAILY INTEGRATION STATE
+# DAILY INTEGRATION STATE (WITH CACHING)
 # =============================================================================
 def get_state_sheet() -> gspread.Worksheet:
     worksheet = get_or_create_worksheet(
@@ -602,7 +631,11 @@ def find_today_state_row(
     integration_name: str,
 ) -> tuple[int | None, list[str] | None]:
     worksheet = get_state_sheet()
-    rows = worksheet.get_all_values()
+    # Use cache to avoid repeated API calls
+    rows = get_cached_worksheet_values(
+        STATE_SHEET,
+        lambda: worksheet.get_all_values()
+    )
     date_value = today_key()
     for row_number in range(
         len(rows),
@@ -1059,9 +1092,10 @@ def import_monobank_account(
     )
     return len(rows)
 # =============================================================================
-# NOVAPAY CONFIG
+# NOVAPAY CONFIG (WITH CACHING)
 # =============================================================================
 def ensure_novapay_config_sheet() -> gspread.Worksheet:
+    """Get or create NovaPay_Config sheet - uses caching to avoid API limit"""
     worksheet = get_or_create_worksheet(
         NOVAPAY_CONFIG_SHEET,
         rows=20,
@@ -1073,7 +1107,12 @@ def ensure_novapay_config_sheet() -> gspread.Worksheet:
         NOVAPAY_SHEET_2,
         NOVAPAY_SHEET_3,
     ]
-    values = worksheet.get_all_values()
+    # Use cache to avoid repeated API calls
+    values = get_cached_worksheet_values(
+        NOVAPAY_CONFIG_SHEET,
+        lambda: worksheet.get_all_values()
+    )
+
     if not values:
         worksheet.update(
             range_name="A1:D3",
@@ -1926,6 +1965,9 @@ def run_integration(
 # MAIN
 # =============================================================================
 def main() -> None:
+    # Clear cache at start of each run
+    clear_worksheet_cache()
+
     logger.info("=" * 70)
     logger.info("🚀 STARTING PAYMENT IMPORT")
     logger.info("=" * 70)
