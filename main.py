@@ -2276,9 +2276,13 @@ def consolidate_cash_flow_():
 
     try:
         ss = get_spreadsheet()
-        target_sheet = ss.worksheet("Грошовий Потік")
+        target_sheet = None
+        for sheet in ss.worksheets():
+            if sheet.id == TARGET_SHEET_GID:
+                target_sheet = sheet
+                break
         if not target_sheet:
-            logger.error("✗ Target sheet (Грошовий Потік) not found")
+            logger.error("✗ Target sheet (gid=%d) not found", TARGET_SHEET_GID)
             return
 
         target_last_col = len(target_sheet.row_values(1))
