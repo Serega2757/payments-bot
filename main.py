@@ -2445,12 +2445,15 @@ def consolidate_cash_flow_():
 def write_to_target_sheet_(target_sheet, rows_to_write, target_last_col):
     """Write rows to target sheet"""
     try:
-        # Find first empty row (check column B)
+        # Find last filled row (check column B) - write AFTER it
         all_values = target_sheet.get_all_values()
         start_row = 2
-        for i in range(1, len(all_values)):
-            if not str(all_values[i][1] if len(all_values[i]) > 1 else "").strip():
-                start_row = i + 1
+
+        # Go from bottom to top to find last filled row in column B
+        for i in range(len(all_values) - 1, 0, -1):
+            if str(all_values[i][1] if len(all_values[i]) > 1 else "").strip():
+                # Found last filled row at index i, write at i+2 (1-based index + 1)
+                start_row = i + 2
                 break
 
         # Ensure enough rows
