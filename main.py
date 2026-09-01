@@ -2096,6 +2096,7 @@ def detect_article_(inc_exp_type, counterparty_text, comment_text):
         tables, "contragent", inc_exp_type, counterparty_text
     )
     if by_contragent:
+        logger.debug("  Article by contragent: '%s' -> '%s'", counterparty_text, by_contragent)
         return by_contragent
 
     # Then try phrase match
@@ -2103,10 +2104,13 @@ def detect_article_(inc_exp_type, counterparty_text, comment_text):
         tables, "phrase", inc_exp_type, comment_text
     )
     if by_phrase:
+        logger.debug("  Article by phrase: '%s' -> '%s'", comment_text, by_phrase)
         return by_phrase
 
     # Fallback
-    return "Продаж Роздріб" if inc_exp_type == "Дохід" else "Невизначена Витрата"
+    fallback = "Продаж Роздріб" if inc_exp_type == "Дохід" else "Невизначена Витрата"
+    logger.debug("  Article fallback: type='%s' -> '%s'", inc_exp_type, fallback)
+    return fallback
 
 def match_lookup_table_(tables, table_name, inc_exp_type, search_text):
     """Match text in lookup table"""
@@ -2426,6 +2430,14 @@ def consolidate_cash_flow_():
             logger.info("✓ No new rows to consolidate")
             return
 
+        # Debug: log first few rows before writing
+        logger.info("📝 Writing %d rows to target sheet", len(rows_to_write))
+        for idx, row in enumerate(rows_to_write[:3]):
+            logger.debug("   Row %d: B=%s, C=%s, F=%s, I=%s, K=%s, L=%s",
+                        idx+1, row[1] if len(row)>1 else "", row[2] if len(row)>2 else "",
+                        row[5] if len(row)>5 else "", row[8] if len(row)>8 else "",
+                        row[10] if len(row)>10 else "", row[11] if len(row)>11 else "")
+
         # Write to target sheet
         write_to_target_sheet_(target_sheet, rows_to_write, target_last_col)
 
@@ -2461,16 +2473,17 @@ def write_to_target_sheet_(target_sheet, rows_to_write, target_last_col):
         if required_rows > target_sheet.row_count:
             target_sheet.add_rows(required_rows - target_sheet.row_count)
 
-        # Add row numbers to column M and convert dates to strings
+        # Add row numbers to column M - keep dates and numbers as is for proper formatting
         for i in range(len(rows_to_write)):
             rows_to_write[i][12] = start_row + i  # M column
-            # Convert any date objects to strings
+            # Convert date objects to strings in dd.MM.yyyy format
+            # Keep numbers as numbers for Google Sheets formatting
             for j in range(len(rows_to_write[i])):
                 cell_value = rows_to_write[i][j]
                 if hasattr(cell_value, 'isoformat'):  # It's a date/datetime
-                    rows_to_write[i][j] = cell_value.isoformat()
-                elif isinstance(cell_value, (int, float)):
-                    rows_to_write[i][j] = str(cell_value)
+                    # Convert to dd.MM.yyyy format string
+                    rows_to_write[i][j] = cell_value.strftime('%d.%m.%Y')
+                # Keep numbers and strings as is
 
         # Write data
         range_name = f"A{start_row}:{chr(64 + target_last_col)}{start_row + len(rows_to_write) - 1}"
