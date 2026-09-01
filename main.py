@@ -2276,6 +2276,12 @@ def consolidate_cash_flow_():
 
     try:
         ss = get_spreadsheet()
+
+        # Debug: print all sheets and their GIDs
+        logger.info("📋 DEBUG: Available sheets in spreadsheet:")
+        for sheet in ss.worksheets():
+            logger.info("   - '%s' (gid=%d)", sheet.title, sheet.id)
+
         target_sheet = None
         for sheet in ss.worksheets():
             if sheet.id == TARGET_SHEET_GID:
@@ -2283,6 +2289,7 @@ def consolidate_cash_flow_():
                 break
         if not target_sheet:
             logger.error("✗ Target sheet (gid=%d) not found", TARGET_SHEET_GID)
+            logger.error("  Looking for gid=%d but sheet not in list above", TARGET_SHEET_GID)
             return
 
         target_last_col = len(target_sheet.row_values(1))
