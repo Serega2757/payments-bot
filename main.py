@@ -53,7 +53,8 @@ def get_cached_worksheet_values(worksheet_key, fetch_func):
 # =============================================================================
 # GENERAL CONFIGURATION
 # =============================================================================
-SPREADSHEET_ID = "1KujvD6_Z6r0474URqHbjlWZthEW_XDqHa1IwtZ0PsqY"
+SPREADSHEET_ID = "1KujvD6_Z6r0474URqHbjlWZthEW_XDqHa1IwtZ0PsqY"  # Import/Source table
+CONSOLIDATION_SPREADSHEET_ID = "1_6FTp38Spb-TcZl2UWkp61TpnT26FXfu-XHeeFsj8Mw"  # Target table
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 IMPORT_DAYS = 30
 HTTP_TIMEOUT_SECONDS = 90
@@ -1968,7 +1969,7 @@ def run_integration(
 # CASH FLOW CONSOLIDATION - NEW UNIFIED FUNCTIONS
 # =============================================================================
 
-TARGET_SHEET_GID = 2132203111  # "Грошовий Потік"
+TARGET_SHEET_GID = 2132203111  # "Грошовий Потік" in Table 2
 BASE_SHEET_NAME = "База"
 LOOKUP_TABLE_HEADER_ROW = 260
 
@@ -1984,14 +1985,24 @@ CONSOLIDATION_SOURCES = [
 # Global cache for lookup tables
 _lookup_tables_cache = None
 
+def clear_lookup_tables_cache():
+    """Clear the lookup tables cache"""
+    global _lookup_tables_cache
+    _lookup_tables_cache = None
+
 def load_lookup_tables_():
-    """Load classification tables from 'База' sheet"""
+    """Load classification tables from 'База' sheet in Table 2"""
     global _lookup_tables_cache
     if _lookup_tables_cache:
         return _lookup_tables_cache
 
     try:
-        ss = get_spreadsheet()
+        # Load from consolidation table (Table 2)
+        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT)
+        creds = Credentials.from_service_account_info(creds_dict)
+        client = gspread.authorize(creds)
+        ss = client.open_by_key(CONSOLIDATION_SPREADSHEET_ID)
+
         base_sheet = ss.worksheet(BASE_SHEET_NAME)
 
         # Load contragent and phrase lookup tables
@@ -2268,20 +2279,29 @@ def expand_cash_withdrawal_rows_(parsed, target_last_col):
     return rows
 
 def consolidate_cash_flow_():
-    """Main consolidation function - reads from source sheets, writes to target"""
+    """Main consolidation function - works ONLY with Table 2"""
     logger.info("")
     logger.info("=" * 70)
-    logger.info("🔄 STARTING CASH FLOW CONSOLIDATION")
+    logger.info("🔄 STARTING CASH FLOW CONSOLIDATION (Table 2 only)")
     logger.info("=" * 70)
 
+    # Clear lookup tables cache to ensure fresh data
+    clear_lookup_tables_cache()
+
     try:
-        ss = get_spreadsheet()
+        # Connect ONLY to consolidation table (Table 2)
+        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT)
+        creds = Credentials.from_service_account_info(creds_dict)
+        client = gspread.authorize(creds)
+        ss = client.open_by_key(CONSOLIDATION_SPREADSHEET_ID)
+        logger.info("  ✓ Connected to consolidation table (Table 2)")
 
         # Debug: print all sheets and their GIDs
-        logger.info("📋 DEBUG: Available sheets in spreadsheet:")
+        logger.info("📋 Available sheets in Table 2:")
         for sheet in ss.worksheets():
             logger.info("   - '%s' (gid=%d)", sheet.title, sheet.id)
 
+        # Find target sheet
         target_sheet = None
         for sheet in ss.worksheets():
             if sheet.id == TARGET_SHEET_GID:
@@ -2289,14 +2309,16 @@ def consolidate_cash_flow_():
                 break
         if not target_sheet:
             logger.error("✗ Target sheet (gid=%d) not found", TARGET_SHEET_GID)
-            logger.error("  Looking for gid=%d but sheet not in list above", TARGET_SHEET_GID)
+            logger.error("  Available sheets:")
+            for sheet in ss.worksheets():
+                logger.error("    - '%s' (gid=%d)", sheet.title, sheet.id)
             return
 
         target_last_col = len(target_sheet.row_values(1))
         rows_to_write = []
         source_marks = []  # Track which source rows need marking
 
-        # Process each source sheet
+        # Process each source sheet (all in Table 2)
         for source_config in CONSOLIDATION_SOURCES:
             sheet_name = source_config.get("sheet", "")
             mark_col = source_config.get("mark_col", 0)
@@ -2319,6 +2341,8 @@ def consolidate_cash_flow_():
 
             if len(all_data) < 2:
                 continue
+
+            logger.info("📌 Processing source sheet '%s' (mark_col=%d)", sheet_name, mark_col)
 
             # Process rows bottom-to-top
             last_row = len(all_data)
@@ -2346,6 +2370,7 @@ def consolidate_cash_flow_():
                     # Create 3 rows
                     expanded = expand_cash_withdrawal_rows_(parsed, target_last_col)
                     rows_to_write.extend(expanded)
+                    logger.info("   → Expanded cash withdrawal row %d into 3 rows", source_row_index)
                     # Mark only the first (original) row
                     source_marks.append({
                         "sheet": source_sheet,
@@ -2353,7 +2378,15 @@ def consolidate_cash_flow_():
                         "mark_col": mark_col
                     })
                 else:
-                    # Regular row
+                    # Regular row - apply article classification
+                    inc_exp_type = parsed.get("inc_exp", "")
+                    counterparty = parsed.get("counterparty", "")
+                    comment = parsed.get("comment", "")
+
+                    # Detect article using lookup tables
+                    article = detect_article_(inc_exp_type, counterparty, comment)
+                    parsed["article"] = article
+
                     row_data = [""] * target_last_col
                     row_data[1] = parsed.get("account", "")       # B
                     row_data[2] = parsed.get("date", "")          # C
@@ -2379,7 +2412,7 @@ def consolidate_cash_flow_():
         write_to_target_sheet_(target_sheet, rows_to_write, target_last_col)
 
         # Mark source rows
-        mark_source_rows_(source_marks, target_sheet)
+        mark_source_rows_(source_marks)
 
         logger.info("")
         logger.info("✓ CONSOLIDATION COMPLETED")
@@ -2435,7 +2468,7 @@ def write_to_target_sheet_(target_sheet, rows_to_write, target_last_col):
     except Exception as e:
         logger.error("✗ Failed to write to target sheet: %s", e)
 
-def mark_source_rows_(source_marks, target_sheet):
+def mark_source_rows_(source_marks):
     """Mark processed rows in source sheets"""
     try:
         for mark_info in source_marks:
