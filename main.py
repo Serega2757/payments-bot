@@ -472,6 +472,31 @@ def get_spreadsheet() -> gspread.Spreadsheet:
     )
     client = gspread.authorize(credentials)
     return client.open_by_key(SPREADSHEET_ID)
+
+def get_consolidation_spreadsheet() -> gspread.Spreadsheet:
+    """Get consolidation spreadsheet (Table 2)"""
+    require_value(
+        "GOOGLE_SERVICE_ACCOUNT",
+        GOOGLE_SERVICE_ACCOUNT,
+    )
+    try:
+        service_account_info = json.loads(
+            GOOGLE_SERVICE_ACCOUNT
+        )
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT содержит "
+            "невалидный JSON"
+        ) from exc
+    credentials = Credentials.from_service_account_info(
+        service_account_info,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+    client = gspread.authorize(credentials)
+    return client.open_by_key(CONSOLIDATION_SPREADSHEET_ID)
 def get_or_create_worksheet(
     sheet_name: str,
     *,
@@ -1998,11 +2023,7 @@ def load_lookup_tables_():
 
     try:
         # Load from consolidation table (Table 2)
-        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT)
-        creds = Credentials.from_service_account_info(creds_dict)
-        client = gspread.authorize(creds)
-        ss = client.open_by_key(CONSOLIDATION_SPREADSHEET_ID)
-
+        ss = get_consolidation_spreadsheet()
         base_sheet = ss.worksheet(BASE_SHEET_NAME)
 
         # Load contragent and phrase lookup tables
@@ -2290,10 +2311,7 @@ def consolidate_cash_flow_():
 
     try:
         # Connect ONLY to consolidation table (Table 2)
-        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT)
-        creds = Credentials.from_service_account_info(creds_dict)
-        client = gspread.authorize(creds)
-        ss = client.open_by_key(CONSOLIDATION_SPREADSHEET_ID)
+        ss = get_consolidation_spreadsheet()
         logger.info("  ✓ Connected to consolidation table (Table 2)")
 
         # Debug: print all sheets and their GIDs
