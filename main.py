@@ -2443,8 +2443,13 @@ def consolidate_cash_flow_():
                         row[5] if len(row)>5 else "", row[8] if len(row)>8 else "",
                         row[10] if len(row)>10 else "", row[11] if len(row)>11 else "")
 
-        # Write to target sheet
-        write_to_target_sheet_(target_sheet, rows_to_write, target_last_col)
+        # Write to target sheet and get target row numbers
+        target_row_numbers = write_to_target_sheet_(target_sheet, rows_to_write, target_last_col)
+
+        # Update source marks with target row numbers
+        for idx, mark_info in enumerate(source_marks):
+            if idx < len(target_row_numbers):
+                mark_info["target_row"] = target_row_numbers[idx]
 
         # Mark source rows
         mark_source_rows_(source_marks)
@@ -2460,7 +2465,7 @@ def consolidate_cash_flow_():
         logger.error(traceback.format_exc())
 
 def write_to_target_sheet_(target_sheet, rows_to_write, target_last_col):
-    """Write rows to target sheet"""
+    """Write rows to target sheet and return target row numbers"""
     try:
         # Find last filled row (check column B) - write AFTER it
         all_values = target_sheet.get_all_values()
@@ -2478,9 +2483,12 @@ def write_to_target_sheet_(target_sheet, rows_to_write, target_last_col):
         if required_rows > target_sheet.row_count:
             target_sheet.add_rows(required_rows - target_sheet.row_count)
 
-        # Add row numbers to column M - keep dates and numbers as is for proper formatting
+        # Calculate target row numbers and add to column M
+        target_row_numbers = []
         for i in range(len(rows_to_write)):
-            rows_to_write[i][12] = start_row + i  # M column
+            target_row_num = start_row + i
+            target_row_numbers.append(target_row_num)
+            rows_to_write[i][12] = target_row_num  # M column
             # Convert date objects to strings in dd.MM.yyyy format
             # Keep numbers as numbers for Google Sheets formatting
             for j in range(len(rows_to_write[i])):
@@ -2509,27 +2517,32 @@ def write_to_target_sheet_(target_sheet, rows_to_write, target_last_col):
         logger.info("  ✓ Written %d rows to target sheet starting at row %d",
                    len(rows_to_write), start_row)
 
+        return target_row_numbers
+
     except Exception as e:
         logger.error("✗ Failed to write to target sheet: %s", e)
+        return []
 
 def mark_source_rows_(source_marks):
-    """Mark processed rows in source sheets"""
+    """Mark processed rows in source sheets with target row numbers"""
     try:
         for mark_info in source_marks:
             sheet = mark_info.get("sheet")
             row_index = mark_info.get("row_index")
             mark_col = mark_info.get("mark_col")
+            target_row = mark_info.get("target_row")
 
             if not sheet or not row_index or not mark_col:
                 continue
 
-            # Find corresponding target row number
-            # The target row number is stored in column M of target_sheet
-            # We'll use the row index as the marker
+            # Write target row number to mark column in source sheet
             try:
-                sheet.update_cell(row_index, mark_col, str(row_index))
-            except:
-                pass
+                value_to_write = str(target_row) if target_row else str(row_index)
+                sheet.update_cell(row_index, mark_col, value_to_write)
+                logger.debug("   Marked row %d in col %d with target row %s",
+                           row_index, mark_col, value_to_write)
+            except Exception as e:
+                logger.warning("⚠ Failed to mark row %d: %s", row_index, e)
 
         logger.info("  ✓ Marked source rows")
     except Exception as e:
