@@ -2458,15 +2458,20 @@ def write_to_target_sheet_(target_sheet, rows_to_write, target_last_col):
         if required_rows > target_sheet.row_count:
             target_sheet.add_rows(required_rows - target_sheet.row_count)
 
-        # Add row numbers to column M
+        # Add row numbers to column M and convert dates to strings
         for i in range(len(rows_to_write)):
             rows_to_write[i][12] = start_row + i  # M column
+            # Convert any date objects to strings
+            for j in range(len(rows_to_write[i])):
+                cell_value = rows_to_write[i][j]
+                if hasattr(cell_value, 'isoformat'):  # It's a date/datetime
+                    rows_to_write[i][j] = cell_value.isoformat()
+                elif isinstance(cell_value, (int, float)):
+                    rows_to_write[i][j] = str(cell_value)
 
         # Write data
-        target_sheet.update(
-            f"A{start_row}:{chr(64 + target_last_col)}{start_row + len(rows_to_write) - 1}",
-            rows_to_write
-        )
+        range_name = f"A{start_row}:{chr(64 + target_last_col)}{start_row + len(rows_to_write) - 1}"
+        target_sheet.update(values=rows_to_write, range_name=range_name)
 
         # Format dates (column C)
         target_sheet.format(
