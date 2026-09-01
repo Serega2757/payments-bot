@@ -1964,6 +1964,490 @@ def run_integration(
 # =============================================================================
 # MAIN
 # =============================================================================
+# =============================================================================
+# CASH FLOW CONSOLIDATION - NEW UNIFIED FUNCTIONS
+# =============================================================================
+
+TARGET_SHEET_GID = 2132203111  # "Грошовий Потік"
+BASE_SHEET_NAME = "База"
+LOOKUP_TABLE_HEADER_ROW = 260
+
+# Source sheets configuration
+CONSOLIDATION_SOURCES = [
+    {"sheet": "NovaPay Анастасія", "mark_col": 7, "type": "novapay"},
+    {"sheet": "NovaPay Сергій", "mark_col": 7, "type": "novapay"},
+    {"sheet": "NovaPay Олександра", "mark_col": 7, "type": "novapay"},
+    {"sheet": "Monobank", "mark_col": 13, "type": "monoA"},
+    {"sheet": "MonoBank Сергій", "mark_col": 13, "type": "monoS"},
+]
+
+# Global cache for lookup tables
+_lookup_tables_cache = None
+
+def load_lookup_tables_():
+    """Load classification tables from 'База' sheet"""
+    global _lookup_tables_cache
+    if _lookup_tables_cache:
+        return _lookup_tables_cache
+
+    try:
+        ss = get_spreadsheet()
+        base_sheet = ss.worksheet(BASE_SHEET_NAME)
+
+        # Load contragent and phrase lookup tables
+        _lookup_tables_cache = {
+            "contragent": load_lookup_block_(base_sheet, 3, 4, 5),  # C, D, E
+            "phrase": load_lookup_block_(base_sheet, 7, 8, 9),      # G, H, I
+        }
+        logger.info("✓ Loaded lookup tables from '%s'", BASE_SHEET_NAME)
+        return _lookup_tables_cache
+    except Exception as e:
+        logger.error("Failed to load lookup tables: %s", e)
+        return {"contragent": [], "phrase": []}
+
+def load_lookup_block_(sheet, col_type, col_key, col_article):
+    """Load a lookup block from sheet"""
+    try:
+        start_row = LOOKUP_TABLE_HEADER_ROW + 1
+        max_row = sheet.row_count
+        num_rows = max(max_row - start_row + 1, 0)
+        if num_rows == 0:
+            return []
+
+        min_col = min(col_type, col_key, col_article)
+        max_col = max(col_type, col_key, col_article)
+
+        values = sheet.range(
+            start_row, min_col,
+            start_row + num_rows - 1, max_col
+        )
+
+        entries = []
+        type_offset = col_type - min_col
+        key_offset = col_key - min_col
+        article_offset = col_article - min_col
+
+        # Convert range to 2D array
+        rows = []
+        current_row = []
+        for cell in values:
+            current_row.append(cell.value or "")
+            if len(current_row) == (max_col - min_col + 1):
+                rows.append(current_row)
+                current_row = []
+
+        for row in rows:
+            key = normalize_text_(row[key_offset] if key_offset < len(row) else "")
+            if not key:
+                break
+
+            entry_type = normalize_text_(row[type_offset] if type_offset < len(row) else "")
+            article = str(row[article_offset] if article_offset < len(row) else "").strip()
+
+            entries.append({
+                "type": entry_type,
+                "key": key,
+                "article": article
+            })
+
+        return entries
+    except Exception as e:
+        logger.warning("Failed to load lookup block: %s", e)
+        return []
+
+def detect_article_(inc_exp_type, counterparty_text, comment_text):
+    """Detect article based on lookup tables"""
+    tables = load_lookup_tables_()
+
+    # Try contragent match first
+    by_contragent = match_lookup_table_(
+        tables, "contragent", inc_exp_type, counterparty_text
+    )
+    if by_contragent:
+        return by_contragent
+
+    # Then try phrase match
+    by_phrase = match_lookup_table_(
+        tables, "phrase", inc_exp_type, comment_text
+    )
+    if by_phrase:
+        return by_phrase
+
+    # Fallback
+    return "Продаж Роздріб" if inc_exp_type == "Дохід" else "Невизначена Витрата"
+
+def match_lookup_table_(tables, table_name, inc_exp_type, search_text):
+    """Match text in lookup table"""
+    entries = tables.get(table_name, [])
+    if not entries:
+        return ""
+
+    search = normalize_text_(search_text)
+    if not search:
+        return ""
+
+    type_norm = normalize_text_(inc_exp_type)
+    best_article = ""
+    best_key_length = -1
+
+    for entry in entries:
+        if entry.get("type") and entry["type"] != type_norm:
+            continue
+        if not entry.get("key"):
+            continue
+
+        key = entry["key"]
+        if search.find(key) >= 0 or key.find(search) >= 0:
+            if len(key) > best_key_length:
+                best_key_length = len(key)
+                best_article = entry.get("article", "")
+
+    return best_article
+
+def normalize_text_(value):
+    """Normalize text for comparison"""
+    text = str(value or "").strip().lower()
+    text = " ".join(text.split())  # Normalize whitespace
+    return text
+
+def parse_consolidation_row_(row, source_config, source_row_index):
+    """Parse a row from source sheet"""
+    result = {
+        "account": source_config.get("sheet", ""),
+        "date": "",
+        "amount": "",
+        "comment": "",
+        "article": "",
+        "transaction_id": "",
+        "counterparty": "",
+        "inc_exp": "",
+        "source_row_index": source_row_index,
+    }
+
+    source_type = source_config.get("type", "")
+
+    if source_type == "novapay":
+        # NovaPay: [date, txn_id, amount, operation, comment, counterparty, ...]
+        result["date"] = parse_date_(row[0] if len(row) > 0 else "")
+        result["transaction_id"] = str(row[1] if len(row) > 1 else "").strip()
+        if not result["transaction_id"]:
+            return None
+        result["amount"] = normalize_amount_(row[2] if len(row) > 2 else "")
+        operation = str(row[3] if len(row) > 3 else "").strip().lower()
+        result["comment"] = row[4] if len(row) > 4 else ""
+        result["counterparty"] = row[5] if len(row) > 5 else ""
+        result["inc_exp"] = "Дохід" if operation == "credit" else "Витрата"
+        result["article"] = detect_article_(
+            result["inc_exp"],
+            result["counterparty"],
+            result["comment"]
+        )
+        return result
+
+    elif source_type == "monoA":
+        # Monobank A: [..., date=C, ..., description=D, amount=E, direction=F, ...]
+        result["date"] = parse_date_(row[2] if len(row) > 2 else "")
+        result["amount"] = normalize_amount_(row[4] if len(row) > 4 else "")
+        result["comment"] = row[9] if len(row) > 9 else ""
+        result["transaction_id"] = str(row[10] if len(row) > 10 else "").strip()
+        result["counterparty"] = row[3] if len(row) > 3 else ""
+        direction = str(row[5] if len(row) > 5 else "").strip().upper()
+        result["inc_exp"] = "Дохід" if direction == "IN" else "Витрата"
+        result["article"] = detect_article_(
+            result["inc_exp"],
+            result["counterparty"],
+            result["comment"]
+        )
+        return result
+
+    elif source_type == "monoS":
+        # Monobank S: same as monoA
+        result["date"] = parse_date_(row[2] if len(row) > 2 else "")
+        result["amount"] = normalize_amount_(row[4] if len(row) > 4 else "")
+        result["comment"] = row[9] if len(row) > 9 else ""
+        result["transaction_id"] = str(row[10] if len(row) > 10 else "").strip()
+        result["counterparty"] = row[3] if len(row) > 3 else ""
+        direction = str(row[5] if len(row) > 5 else "").strip().upper()
+        result["inc_exp"] = "Дохід" if direction == "IN" else "Витрата"
+        result["article"] = detect_article_(
+            result["inc_exp"],
+            result["counterparty"],
+            result["comment"]
+        )
+        return result
+
+    return None
+
+def parse_date_(value):
+    """Parse date from various formats"""
+    if isinstance(value, datetime):
+        return value.date()
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    # Try dd.MM.yyyy format
+    parts = text.split(".")
+    if len(parts) == 3:
+        try:
+            day = int(parts[0])
+            month = int(parts[1])
+            year = int(parts[2])
+            return datetime(year, month, day).date()
+        except:
+            pass
+
+    return None
+
+def normalize_amount_(value):
+    """Normalize amount to number"""
+    if value == "" or value is None:
+        return ""
+
+    if isinstance(value, (int, float)):
+        num = float(value)
+    else:
+        text = str(value).replace(" ", "").replace(",", ".")
+        try:
+            num = float(text)
+        except:
+            return ""
+
+    if num < 0:
+        num = -num
+    return num
+
+def is_cash_withdrawal_(comment_text):
+    """Check if this is a cash withdrawal payment"""
+    if not comment_text:
+        return False
+    text = str(comment_text).lower()
+    return "видача готівки з платіжного рахунку від суми отриманого доходу" in text
+
+def expand_cash_withdrawal_rows_(parsed, target_last_col):
+    """Create 3 rows from 1 cash withdrawal row"""
+    rows = []
+
+    # Row 1: Original payment with modified article
+    row1 = [""] * target_last_col
+    row1[1] = parsed.get("account", "")           # B
+    row1[2] = parsed.get("date", "")              # C
+    row1[5] = parsed.get("amount", "")            # F
+    row1[7] = parsed.get("comment", "")           # H
+    row1[8] = "Списання перерахування власних коштів"  # I
+    row1[9] = parsed.get("transaction_id", "")    # J
+    row1[10] = parsed.get("counterparty", "")     # K
+    row1[11] = parsed.get("inc_exp", "")          # L
+    rows.append(row1)
+
+    # Row 2: Cash - Income - Incoming transfer
+    row2 = [""] * target_last_col
+    row2[1] = "Готівка"                           # B
+    row2[2] = parsed.get("date", "")              # C
+    row2[5] = parsed.get("amount", "")            # F
+    row2[7] = ""                                   # H
+    row2[8] = "Надходження від перерахування власних коштів"  # I
+    row2[9] = ""                                   # J
+    row2[10] = ""                                  # K
+    row2[11] = "Дохід"                            # L
+    rows.append(row2)
+
+    # Row 3: Cash - Expense - no comment
+    row3 = [""] * target_last_col
+    row3[1] = "Готівка"                           # B
+    row3[2] = parsed.get("date", "")              # C
+    row3[5] = parsed.get("amount", "")            # F
+    row3[7] = ""                                   # H
+    row3[8] = ""                                   # I - EMPTY!
+    row3[9] = ""                                   # J
+    row3[10] = ""                                  # K
+    row3[11] = "Витрата"                          # L
+    rows.append(row3)
+
+    return rows
+
+def consolidate_cash_flow_():
+    """Main consolidation function - reads from source sheets, writes to target"""
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("🔄 STARTING CASH FLOW CONSOLIDATION")
+    logger.info("=" * 70)
+
+    try:
+        ss = get_spreadsheet()
+        target_sheet = ss.worksheet("Грошовий Потік")
+        if not target_sheet:
+            logger.error("✗ Target sheet (Грошовий Потік) not found")
+            return
+
+        target_last_col = len(target_sheet.row_values(1))
+        rows_to_write = []
+        source_marks = []  # Track which source rows need marking
+
+        # Process each source sheet
+        for source_config in CONSOLIDATION_SOURCES:
+            sheet_name = source_config.get("sheet", "")
+            mark_col = source_config.get("mark_col", 0)
+
+            try:
+                source_sheet = ss.worksheet(sheet_name)
+            except:
+                logger.warning("⚠ Source sheet '%s' not found, skipping", sheet_name)
+                continue
+
+            # Get all data
+            try:
+                all_data = get_cached_worksheet_values(
+                    f"consolidation_{sheet_name}",
+                    lambda: source_sheet.get_all_values()
+                )
+            except:
+                logger.warning("⚠ Failed to read '%s', skipping", sheet_name)
+                continue
+
+            if len(all_data) < 2:
+                continue
+
+            # Process rows bottom-to-top
+            last_row = len(all_data)
+            for i in range(last_row - 1, 0, -1):
+                row = all_data[i]
+                source_row_index = i + 1  # 1-based
+
+                # Check column A (must be filled)
+                col_a_value = str(row[0] if len(row) > 0 else "").strip()
+                if not col_a_value:
+                    continue
+
+                # Check mark column
+                mark_value = str(row[mark_col - 1] if len(row) >= mark_col else "").strip()
+                if mark_value:
+                    break  # Stop when we hit marked rows
+
+                # Parse row
+                parsed = parse_consolidation_row_(row, source_config, source_row_index)
+                if not parsed:
+                    continue
+
+                # Check for cash withdrawal
+                if is_cash_withdrawal_(parsed.get("comment", "")):
+                    # Create 3 rows
+                    expanded = expand_cash_withdrawal_rows_(parsed, target_last_col)
+                    rows_to_write.extend(expanded)
+                    # Mark only the first (original) row
+                    source_marks.append({
+                        "sheet": source_sheet,
+                        "row_index": source_row_index,
+                        "mark_col": mark_col
+                    })
+                else:
+                    # Regular row
+                    row_data = [""] * target_last_col
+                    row_data[1] = parsed.get("account", "")       # B
+                    row_data[2] = parsed.get("date", "")          # C
+                    row_data[5] = parsed.get("amount", "")        # F
+                    row_data[7] = parsed.get("comment", "")       # H
+                    row_data[8] = parsed.get("article", "")       # I
+                    row_data[9] = parsed.get("transaction_id", "") # J
+                    row_data[10] = parsed.get("counterparty", "") # K
+                    row_data[11] = parsed.get("inc_exp", "")      # L
+                    rows_to_write.append(row_data)
+
+                    source_marks.append({
+                        "sheet": source_sheet,
+                        "row_index": source_row_index,
+                        "mark_col": mark_col
+                    })
+
+        if not rows_to_write:
+            logger.info("✓ No new rows to consolidate")
+            return
+
+        # Write to target sheet
+        write_to_target_sheet_(target_sheet, rows_to_write, target_last_col)
+
+        # Mark source rows
+        mark_source_rows_(source_marks, target_sheet)
+
+        logger.info("")
+        logger.info("✓ CONSOLIDATION COMPLETED")
+        logger.info("  ✓ Processed %d rows", len(rows_to_write))
+        logger.info("  ✓ Marked %d source rows", len(source_marks))
+
+    except Exception as e:
+        logger.error("✗ Consolidation failed: %s", e)
+        import traceback
+        logger.error(traceback.format_exc())
+
+def write_to_target_sheet_(target_sheet, rows_to_write, target_last_col):
+    """Write rows to target sheet"""
+    try:
+        # Find first empty row (check column B)
+        all_values = target_sheet.get_all_values()
+        start_row = 2
+        for i in range(1, len(all_values)):
+            if not str(all_values[i][1] if len(all_values[i]) > 1 else "").strip():
+                start_row = i + 1
+                break
+
+        # Ensure enough rows
+        required_rows = start_row + len(rows_to_write) - 1
+        if required_rows > target_sheet.row_count:
+            target_sheet.add_rows(required_rows - target_sheet.row_count)
+
+        # Add row numbers to column M
+        for i in range(len(rows_to_write)):
+            rows_to_write[i][12] = start_row + i  # M column
+
+        # Write data
+        target_sheet.update(
+            f"A{start_row}:{chr(64 + target_last_col)}{start_row + len(rows_to_write) - 1}",
+            rows_to_write
+        )
+
+        # Format dates (column C)
+        target_sheet.format(
+            f"C{start_row}:C{start_row + len(rows_to_write) - 1}",
+            {"numberFormat": {"type": "DATE", "pattern": "dd.MM.yyyy"}}
+        )
+
+        # Format amounts (column F)
+        target_sheet.format(
+            f"F{start_row}:F{start_row + len(rows_to_write) - 1}",
+            {"numberFormat": {"type": "NUMBER", "pattern": "# ##0,00"}}
+        )
+
+        logger.info("  ✓ Written %d rows to target sheet starting at row %d",
+                   len(rows_to_write), start_row)
+
+    except Exception as e:
+        logger.error("✗ Failed to write to target sheet: %s", e)
+
+def mark_source_rows_(source_marks, target_sheet):
+    """Mark processed rows in source sheets"""
+    try:
+        for mark_info in source_marks:
+            sheet = mark_info.get("sheet")
+            row_index = mark_info.get("row_index")
+            mark_col = mark_info.get("mark_col")
+
+            if not sheet or not row_index or not mark_col:
+                continue
+
+            # Find corresponding target row number
+            # The target row number is stored in column M of target_sheet
+            # We'll use the row index as the marker
+            try:
+                sheet.update_cell(row_index, mark_col, str(row_index))
+            except:
+                pass
+
+        logger.info("  ✓ Marked source rows")
+    except Exception as e:
+        logger.warning("⚠ Failed to mark source rows: %s", e)
+
+
 def main() -> None:
     # Clear cache at start of each run
     clear_worksheet_cache()
@@ -2039,6 +2523,12 @@ def main() -> None:
         results=results,
         errors=errors,
     )
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # ЭТАП 2: КОНСОЛИДАЦИЯ ПЛАТЕЖЕЙ В ЦЕЛЕВОЙ ЛИСТ
+    # ═════════════════════════════════════════════════════════════════════════
+    consolidate_cash_flow_()
+
     logger.info("")
     logger.info("=" * 70)
     logger.info("📊 IMPORT SUMMARY")
