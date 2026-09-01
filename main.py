@@ -2000,11 +2000,11 @@ LOOKUP_TABLE_HEADER_ROW = 260
 
 # Source sheets configuration
 CONSOLIDATION_SOURCES = [
-    {"sheet": "NovaPay Анастасія", "mark_col": 7, "type": "novapay"},
-    {"sheet": "NovaPay Сергій", "mark_col": 7, "type": "novapay"},
-    {"sheet": "NovaPay Олександра", "mark_col": 7, "type": "novapay"},
-    {"sheet": "Monobank", "mark_col": 13, "type": "monoA"},
-    {"sheet": "MonoBank Сергій", "mark_col": 13, "type": "monoS"},
+    {"sheet": "NovaPay Анастасія", "mark_col": 7, "type": "novapay", "account_name": "NovaPay Анастасія"},
+    {"sheet": "NovaPay Сергій", "mark_col": 7, "type": "novapay", "account_name": "NovaPay Сергій"},
+    {"sheet": "NovaPay Олександра", "mark_col": 7, "type": "novapay", "account_name": "NovaPay Цілованська"},
+    {"sheet": "Monobank", "mark_col": 13, "type": "monoA", "account_name": "МОНО Анастасія"},
+    {"sheet": "MonoBank Сергій", "mark_col": 13, "type": "monoS", "account_name": "МОНО Сергій"},
 ]
 
 # Global cache for lookup tables
@@ -2149,7 +2149,7 @@ def normalize_text_(value):
 def parse_consolidation_row_(row, source_config, source_row_index):
     """Parse a row from source sheet"""
     result = {
-        "account": source_config.get("sheet", ""),
+        "account": source_config.get("account_name", source_config.get("sheet", "")),
         "date": "",
         "amount": "",
         "comment": "",
@@ -2365,6 +2365,11 @@ def consolidate_cash_flow_():
                 continue
 
             logger.info("📌 Processing source sheet '%s' (mark_col=%d)", sheet_name, mark_col)
+
+            # Debug: show first row structure
+            if len(all_data) > 1:
+                first_data_row = all_data[1]
+                logger.debug("   First data row (cols 0-6): %s", first_data_row[:7] if len(first_data_row) >= 7 else first_data_row)
 
             # Process rows bottom-to-top
             last_row = len(all_data)
